@@ -1,4 +1,4 @@
-"""終端互動介面與命令列控制器 v1.4.1（表格化檢查與 SN 顯示、區間壓縮、精準補齊狀態與集數）。"""
+"""終端互動介面與命令列控制器 v1.4.2（表格化檢查與 SN 顯示、區間壓縮、精準補齊狀態與集數）。"""
 
 from __future__ import annotations
 
@@ -42,6 +42,7 @@ from .metadata_fetcher import (
     search_anigamer,
 )
 from .notifier import (
+    DownloadedRecord,
     Notifier,
     format_anime_added_notice,
     format_check_digest,
@@ -131,6 +132,13 @@ def _open_folder(path: Path, raw_os: str) -> None:
             subprocess.run(["xdg-open", str(path)], check=False)
     except Exception:
         pass
+
+
+def _format_size_mb(num_bytes: int) -> str:
+    if num_bytes <= 0:
+        return ""
+    mb = num_bytes / (1024 * 1024)
+    return f"{mb:.1f} MB" if mb >= 0.1 else f"{num_bytes / 1024:.0f} KB"
 
 
 def _format_ep_ratio(online: int | None, total: int | None) -> str:
@@ -366,7 +374,7 @@ class AnimeManagerApp:
         body = f"{status_line}\n\n[bold]{header_title}：[/bold]\n" + "\n".join(brief_lines)
 
         if HAS_RICH and console:
-            console.print(Panel(body, title="aniGamerPlus 增量下載管理器 v1.4.1", border_style="cyan", padding=(0, 2)))
+            console.print(Panel(body, title="aniGamerPlus 增量下載管理器 v1.4.2", border_style="cyan", padding=(0, 2)))
         else:
             print("=" * 72)
             _print(body)
@@ -507,6 +515,7 @@ class AnimeManagerApp:
         single_sn: str | None = None,
         force_single_episode: bool = False,
         push_check_notify: bool = False,
+        interactive: bool = True,
     ) -> None:
         if force_single_episode and single_sn:
             ep = EpisodeInfo(sn=single_sn, episode_label=f"sn={single_sn}", anime_title=f"SN-{single_sn}")
@@ -573,16 +582,21 @@ class AnimeManagerApp:
             return
 
         # ===== 開始執行下載 =====
-        downloaded_ok: list[str] = []
+        downloaded_ok: list[DownloadedRecord] = []
         downloaded_fail: list[str] = []
         remaining_after: list[str] = []
+        was_interrupted = False
 
-        for snap in snapshots:
+        # 記錄每部作品完成進度，供中途退出時一次彙整所有剩餘（包含後面尚未輪到的作品）
+        completed_by_sn: dict[str, set[str]] = {}
+
+        for snap_idx, snap in enumerate(snapshots):
             if snap.error or not snap.diff:
                 if _confirm(f"\n《{snap.title}》線上解析失敗，是否改用原生 -m latest 抓最新一集？", default=False):
                     _, interrupted = self.downloader.download_latest_direct(snap.item.sn, snap.item.resolution)
                     if interrupted:
-                        _print("[yellow]已手動中斷下載。[/yellow]")
+                        was_interrupted = True
+                        _print("[yellow]已乾淨中斷下載。[/yellow]")
                         break
                 continue
 
@@ -590,6 +604,7 @@ class AnimeManagerApp:
             title = snap.title
             missing_queue = list(snap.diff.missing_episodes)
             upgrade_queue = upgrade_plans.get(item.sn, [])
+            completed_sns = completed_by_sn.setdefault(item.sn, set())
 
             if not missing_queue and not upgrade_queue:
                 continue
@@ -597,40 +612,46 @@ class AnimeManagerApp:
             item_aborted = False
             if missing_queue:
                 r_str = format_episode_ranges(missing_queue)
-                _print(f"\n[bold blue]開始下載《{title}》：{r_str}（共 {len(missing_queue)} 集；按 Ctrl+C 可中斷）[/bold blue]")
-                completed_sns: set[str] = set()
+                _print(f"\n[bold blue]開始下載《{title}》：{r_str}（共 {len(missing_queue)} 集；按 Ctrl+C 可乾淨中斷）[/bold blue]")
 
                 def _on_start_new(idx: int, total: int, ep: EpisodeInfo) -> None:
                     _print(f"\n[bold blue][{idx}/{total}] {title} 第 {ep.episode_label} 集 (sn={ep.sn})[/bold blue]")
 
                 def _on_complete_new(idx: int, total: int, ep: EpisodeInfo, res: DownloadResult) -> None:
                     if res.interrupted:
-                        downloaded_fail.append(f"{title} 第{ep.episode_label}集 (手動中斷)")
-                        _print(f"[yellow]已手動中斷：{title} 第 {ep.episode_label} 集[/yellow]")
+                        downloaded_fail.append(f"《{title}》第 {ep.episode_label} 集（手動中斷）")
+                        clean_note = ""
+                        if res.cleaned_temp_count > 0:
+                            sz = _format_size_mb(res.cleaned_temp_bytes)
+                            clean_note = f"；已自動清理 temp/ 殘檔 {res.cleaned_temp_count} 項" + (f" ({sz})" if sz else "")
+                        _print(f"\n[yellow]已乾淨中斷：《{title}》第 {ep.episode_label} 集{clean_note}[/yellow]")
                     elif res.success:
                         completed_sns.add(ep.sn)
                         actual_res, fpath = self.tracker.find_highest_local_resolution(ep, anime_name_hint=item.name)
                         self.tracker.mark_downloaded(ep, actual_res or item.resolution, fpath)
-                        res_tag = f" {actual_res}P" if actual_res else ""
-                        downloaded_ok.append(f"{title} 第{ep.episode_label}集{res_tag}")
-                        _print(f"[green]完成：{title} 第 {ep.episode_label} 集{res_tag}[/green]")
+                        res_tag = f"{actual_res}P" if actual_res else f"{item.resolution}P"
+                        downloaded_ok.append(DownloadedRecord(title=title, episode=ep, resolution_label=res_tag))
+                        _print(f"[green]完成：《{title}》第 {ep.episode_label} 集 ({res_tag})[/green]")
                     else:
-                        downloaded_fail.append(f"{title} 第{ep.episode_label}集 ({res.message})")
-                        _print(f"[red]下載異常 ({res.message})：{title} 第 {ep.episode_label} 集[/red]")
+                        downloaded_fail.append(f"《{title}》第 {ep.episode_label} 集（{res.message}）")
+                        _print(f"[red]下載異常 ({res.message})：《{title}》第 {ep.episode_label} 集[/red]")
 
-                _, aborted = self.downloader.download_batch(
+                def _on_cooldown_new(secs: int, next_ep: EpisodeInfo) -> None:
+                    _print(f"[dim]冷卻 {secs} 秒後開始第 {next_ep.episode_label} 集，此時按 Ctrl+C 可無損中止...[/dim]")
+
+                _, aborted, interrupted_now = self.downloader.download_batch(
                     episodes=missing_queue,
                     resolution=item.resolution,
                     cooldown_seconds=self.config.cooldown_seconds,
                     on_start=_on_start_new,
                     on_complete=_on_complete_new,
+                    on_cooldown=_on_cooldown_new,
                 )
-                leftover = [e for e in missing_queue if e.sn not in completed_sns]
-                if leftover:
-                    remaining_after.append(f"《{title}》剩餘 {format_episode_ranges(leftover)}（共 {len(leftover)} 集）")
+                if interrupted_now:
+                    was_interrupted = True
                 if aborted:
                     item_aborted = True
-                    _print("[yellow]已中斷本次下載批次。[/yellow]")
+                    _print("[yellow]已中止本次下載批次。[/yellow]")
                     break
 
             if upgrade_queue and not item_aborted:
@@ -643,9 +664,16 @@ class AnimeManagerApp:
 
                 def _on_complete_up(idx: int, total: int, ep: EpisodeInfo, res: DownloadResult) -> None:
                     if res.interrupted:
-                        _print(f"[yellow]已手動中斷升級：{title} 第 {ep.episode_label} 集[/yellow]")
+                        clean_note = ""
+                        if res.cleaned_temp_count > 0:
+                            sz = _format_size_mb(res.cleaned_temp_bytes)
+                            clean_note = f"；已自動清理 temp/ 殘檔 {res.cleaned_temp_count} 項" + (f" ({sz})" if sz else "")
+                        _print(f"\n[yellow]已乾淨中斷升級：《{title}》第 {ep.episode_label} 集{clean_note}[/yellow]")
                     elif not res.success:
-                        downloaded_fail.append(f"{title} 第{ep.episode_label}集升級失敗 ({res.message})")
+                        downloaded_fail.append(f"《{title}》第 {ep.episode_label} 集升級失敗（{res.message}）")
+
+                def _on_cooldown_up(secs: int, next_ep: EpisodeInfo) -> None:
+                    _print(f"[dim]冷卻 {secs} 秒後嘗試升級第 {next_ep.episode_label} 集，此時按 Ctrl+C 可無損中止...[/dim]")
 
                 def _post_check_upgrade(ep: EpisodeInfo, res: DownloadResult) -> bool:
                     nonlocal circuit_broken
@@ -654,34 +682,60 @@ class AnimeManagerApp:
                     actual_res, fpath = self.tracker.find_highest_local_resolution(ep, anime_name_hint=item.name)
                     if actual_res >= target_res_int - 100:
                         self.tracker.mark_downloaded(ep, actual_res, fpath)
-                        downloaded_ok.append(f"{title} 第{ep.episode_label}集 ({actual_res}P升級)")
-                        _print(f"[green]後置檢查通過：{title} 第 {ep.episode_label} 集已升級 {actual_res}P！[/green]")
+                        downloaded_ok.append(DownloadedRecord(title=title, episode=ep, resolution_label=f"{actual_res}P升級"))
+                        _print(f"[green]後置檢查通過：《{title}》第 {ep.episode_label} 集已升級 {actual_res}P！[/green]")
                         return False
                     circuit_broken = True
                     _print(
-                        f"[bold red]後置檢查熔斷：[/bold red]{title} 第 {ep.episode_label} 集實際僅 {actual_res or '未知'}P，"
+                        f"[bold red]後置檢查熔斷：[/bold red]《{title}》第 {ep.episode_label} 集實際僅 {actual_res or '未知'}P，"
                         "已中止剩餘升級任務避免重複抓 720P。"
                     )
                     return True
 
-                _, aborted = self.downloader.download_batch(
+                _, aborted, interrupted_now = self.downloader.download_batch(
                     episodes=upgrade_queue,
                     resolution=item.resolution,
                     cooldown_seconds=self.config.cooldown_seconds,
                     on_start=_on_start_up,
                     on_complete=_on_complete_up,
+                    on_cooldown=_on_cooldown_up,
                     should_abort=_post_check_upgrade,
                 )
+                if interrupted_now:
+                    was_interrupted = True
                 if aborted and not circuit_broken:
-                    _print("[yellow]已中斷本次升級批次。[/yellow]")
+                    _print("[yellow]已中止本次升級批次。[/yellow]")
                     break
 
-        if downloaded_ok or downloaded_fail:
-            n_title, n_body = format_download_report(downloaded_ok, downloaded_fail, remaining_after)
-            _print(f"\n[bold green]{n_title}[/bold green]\n{n_body}")
+        # 彙整所有作品（含後續尚未輪到的作品）剩餘未下載集數，統一壓縮為區間
+        for snap in snapshots:
+            if snap.error or not snap.diff or not snap.diff.missing_episodes:
+                continue
+            done_sns = completed_by_sn.get(snap.item.sn, set())
+            leftover = [e for e in snap.diff.missing_episodes if e.sn not in done_sns]
+            if leftover:
+                cnt = len(leftover)
+                r_txt = format_episode_ranges(leftover, compact=False)
+                remaining_after.append(f"《{snap.title}》剩餘 {r_txt}（共 {cnt} 集）")
+
+        if downloaded_ok or downloaded_fail or (was_interrupted and remaining_after):
+            n_title, n_body = format_download_report(
+                downloaded_ok,
+                downloaded_fail,
+                remaining_after,
+                interrupted=was_interrupted,
+            )
+            title_color = "bold yellow" if was_interrupted else "bold green"
+            _print(f"\n[{title_color}]{n_title}[/{title_color}]\n{n_body}")
+
             if self.notifier.enabled:
-                for _, ok, msg in self.notifier.send(n_title, n_body):
-                    _print(f"[dim]推播：{msg}[/dim]" if ok else f"[yellow]推播異常：{msg}[/yellow]")
+                # 若為手動中斷且處於互動模式，改為先詢問再推播，避免人在電腦前還被四個管道轟炸
+                should_push = True
+                if was_interrupted:
+                    should_push = _confirm("\n本次為手動中斷，是否仍將中斷結算推播到手機？", default=False) if interactive else False
+                if should_push:
+                    for _, ok, msg in self.notifier.send(n_title, n_body):
+                        _print(f"[dim]推播：{msg}[/dim]" if ok else f"[yellow]推播異常：{msg}[/yellow]")
 
     def action_ad_hoc_download(self) -> None:
         raw = _ask("\n請貼上動畫瘋網址或 SN（輸入 q 取消）", default="q")

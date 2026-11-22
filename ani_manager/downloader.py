@@ -1,9 +1,15 @@
-"""aniGamerPlus.py 可即時中斷呼叫、後置熔斷與任務執行模組。"""
+"""aniGamerPlus.py 獨立行程群組呼叫、乾淨中斷、殘檔清理與後置熔斷模組。"""
 
 from __future__ import annotations
 
+import os
+import shutil
+import signal
 import subprocess
+import sys
+import time
 from dataclasses import dataclass
+from pathlib import Path
 
 from .env_detector import EnvironmentInfo
 from .episode_fetcher import EpisodeInfo
@@ -17,11 +23,130 @@ class DownloadResult:
     success: bool
     return_code: int
     interrupted: bool = False
+    cleaned_temp_count: int = 0
+    cleaned_temp_bytes: int = 0
     message: str = ""
 
 
+def _get_path_size(path: Path) -> int:
+    if path.is_file():
+        try:
+            return path.stat().st_size
+        except OSError:
+            return 0
+    total = 0
+    if path.is_dir():
+        for p in path.rglob("*"):
+            if p.is_file():
+                try:
+                    total += p.stat().st_size
+                except OSError:
+                    pass
+    return total
+
+
+def cleanup_interrupted_temp(anigamer_dir: Path, sn: str, started_at: float) -> tuple[int, int]:
+    """
+    中斷後自動清理 aniGamerPlus 的 temp/ 殘留切片與暫存檔。
+    僅移除檔名包含該集 SN 或於本次下載開始後新建立／修改的項目，避免誤刪其他無關檔案。
+    回傳 (已清理項目數, 釋放位元組數)。
+    """
+    temp_dir = anigamer_dir / "temp"
+    if not temp_dir.is_dir():
+        return 0, 0
+
+    cleaned_count = 0
+    cleaned_bytes = 0
+    sn_str = str(sn).strip()
+    cutoff = started_at - 2.0
+
+    for entry in list(temp_dir.iterdir()):
+        try:
+            mtime = entry.stat().st_mtime
+        except OSError:
+            continue
+
+        matches_sn = bool(sn_str) and (sn_str in entry.name)
+        is_recent = mtime >= cutoff
+        if not (matches_sn or is_recent):
+            continue
+
+        size = _get_path_size(entry)
+        try:
+            if entry.is_dir():
+                shutil.rmtree(entry, ignore_errors=False)
+            else:
+                entry.unlink(missing_ok=True)
+            cleaned_count += 1
+            cleaned_bytes += size
+        except Exception:
+            pass
+
+    return cleaned_count, cleaned_bytes
+
+
+def _terminate_process_tree(proc: subprocess.Popen) -> None:
+    """乾淨終止整個獨立行程群組（含底層 ffmpeg），避免 gevent Traceback 洗版與孤兒行程殘留。"""
+    if proc.poll() is not None:
+        return
+
+    if sys.platform == "win32":
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                timeout=5,
+            )
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+        try:
+            proc.wait(timeout=3)
+        except Exception:
+            pass
+        return
+
+    # POSIX (macOS / Linux): 對整個 session/process group 發送 SIGTERM -> SIGKILL
+    try:
+        pgid = os.getpgid(proc.pid)
+        os.killpg(pgid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    except Exception:
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+
+    try:
+        proc.wait(timeout=2.0)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+
+    try:
+        pgid = os.getpgid(proc.pid)
+        os.killpg(pgid, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+    try:
+        proc.wait(timeout=2.0)
+    except Exception:
+        pass
+
+
 class AniGamerDownloader:
-    """以可安全終止的子行程呼叫原生 aniGamerPlus.py，確保 Ctrl+C 可即時中斷而不遺留殭屍行程。"""
+    """以獨立行程群組安全呼叫原生 aniGamerPlus.py，實現無洗版秒停與自動清理暫存殘檔。"""
 
     def __init__(self, env: EnvironmentInfo) -> None:
         self.env = env
@@ -49,35 +174,45 @@ class AniGamerDownloader:
                 cmd.extend(["-r", clean_res])
         return cmd
 
-    def _run_interruptible(self, cmd: list[str]) -> tuple[int, bool]:
-        """以 Popen 執行子行程；按 Ctrl+C 時立即終止子行程並回報 interrupted=True。"""
-        proc = subprocess.Popen(cmd, cwd=str(self.env.anigamer_dir))
+    def _run_isolated(self, cmd: list[str]) -> tuple[int, bool]:
+        """
+        在獨立行程群組內執行子行程：
+        - 按 Ctrl+C 時只有本管理腳本收到 SIGINT，子行程不會觸發 gevent BlockingSwitchOutError 洗版。
+        - 由本腳本統一送出行程群組終止訊號，確保 aniGamerPlus 與 ffmpeg 一併乾淨退場。
+        """
+        popen_kwargs: dict = {"cwd": str(self.env.anigamer_dir)}
+        if sys.platform == "win32":
+            popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        else:
+            popen_kwargs["start_new_session"] = True
+
+        proc = subprocess.Popen(cmd, **popen_kwargs)
         try:
-            rc = proc.wait()
-            return rc, False
+            while True:
+                rc = proc.poll()
+                if rc is not None:
+                    return rc, False
+                time.sleep(0.15)
         except KeyboardInterrupt:
-            try:
-                proc.terminate()
-                proc.wait(timeout=3)
-            except Exception:
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
+            _terminate_process_tree(proc)
             return -2, True
 
     def download_episode(self, episode: EpisodeInfo, resolution: str | None = None) -> DownloadResult:
-        """下載單一集數（-m single）。"""
+        """下載單一集數（-m single），若中途遭手動中斷則自動清理 temp/ 殘檔。"""
         cmd = self.build_command(episode.sn, mode="single", resolution=resolution)
+        started_at = time.time()
         try:
-            rc, interrupted = self._run_interruptible(cmd)
+            rc, interrupted = self._run_isolated(cmd)
             if interrupted:
+                c_cnt, c_bytes = cleanup_interrupted_temp(self.env.anigamer_dir, episode.sn, started_at)
                 return DownloadResult(
                     sn=episode.sn,
                     episode_label=episode.episode_label,
                     success=False,
                     return_code=rc,
                     interrupted=True,
+                    cleaned_temp_count=c_cnt,
+                    cleaned_temp_bytes=c_bytes,
                     message="使用者手動中斷 (Ctrl+C)",
                 )
             ok = rc == 0
@@ -100,7 +235,11 @@ class AniGamerDownloader:
     def download_latest_direct(self, base_sn: str, resolution: str | None = None) -> tuple[int, bool]:
         """直接委派 aniGamerPlus 下載最新一集（-m latest）。"""
         cmd = self.build_command(base_sn, mode="latest", resolution=resolution)
-        return self._run_interruptible(cmd)
+        started_at = time.time()
+        rc, interrupted = self._run_isolated(cmd)
+        if interrupted:
+            cleanup_interrupted_temp(self.env.anigamer_dir, base_sn, started_at)
+        return rc, interrupted
 
     def download_batch(
         self,
@@ -109,16 +248,18 @@ class AniGamerDownloader:
         cooldown_seconds: int = 10,
         on_start=None,
         on_complete=None,
+        on_cooldown=None,
         should_abort=None,
-    ) -> tuple[list[DownloadResult], bool]:
+    ) -> tuple[list[DownloadResult], bool, bool]:
         """
-        依序下載集數；支援：
-        - 任意時刻 Ctrl+C 秒退（包含冷卻倒數期間）
-        - should_abort(ep, res) 回傳 True 時立即熔斷中止剩餘任務（例如後置畫質檢查發現仍降級 720P）
+        依序下載集數；回傳 (results, aborted, user_interrupted)。
+        - 任意時刻按 Ctrl+C（含冷卻倒數期間）皆可乾淨中止並回報 user_interrupted=True。
+        - should_abort(ep, res) 回傳 True 時觸發後置熔斷（aborted=True, user_interrupted=False）。
         """
         results: list[DownloadResult] = []
         total = len(episodes)
         aborted = False
+        user_interrupted = False
 
         for idx, ep in enumerate(episodes, 1):
             if on_start:
@@ -132,6 +273,7 @@ class AniGamerDownloader:
 
             if res.interrupted:
                 aborted = True
+                user_interrupted = True
                 break
 
             if should_abort and should_abort(ep, res):
@@ -139,10 +281,14 @@ class AniGamerDownloader:
                 break
 
             if idx < total and cooldown_seconds > 0:
+                next_ep = episodes[idx]
+                if on_cooldown:
+                    on_cooldown(cooldown_seconds, next_ep)
                 try:
                     interruptible_sleep(cooldown_seconds, step=0.2)
                 except KeyboardInterrupt:
                     aborted = True
+                    user_interrupted = True
                     break
 
-        return results, aborted
+        return results, aborted, user_interrupted

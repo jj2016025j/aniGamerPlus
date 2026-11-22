@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-aniGamerPlus 模組化增量下載工具入口腳本 (v1.4)。
+aniGamerPlus 模組化增量下載工具入口腳本 (v1.4.2)。
 支援同目錄外掛模式與獨立私人倉庫模式（vendor/aniGamerPlus）。
 """
 
@@ -15,7 +15,7 @@ from ani_manager.env_detector import configure_console_encoding
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="aniGamerPlus 模組化增量更新管理工具 v1.4")
+    parser = argparse.ArgumentParser(description="aniGamerPlus 模組化增量更新管理工具 v1.4.2")
     parser.add_argument("--update", action="store_true", help="非互動模式：檢查所有啟用中追番並下載新集數")
     parser.add_argument("--check", action="store_true", help="非互動模式：僅檢查線上集數與本地差異")
     parser.add_argument("--notify", action="store_true", help="搭配 --check，檢查完成後自動將追番簡報推播到手機")
@@ -53,12 +53,12 @@ def main() -> None:
 
     if args.check:
         app.show_banner()
-        app.action_check_or_update(download=False, single_sn=sn, push_check_notify=args.notify)
+        app.action_check_or_update(download=False, single_sn=sn, push_check_notify=args.notify, interactive=False)
         return
 
     if args.update:
         app.show_banner()
-        app.action_check_or_update(download=True, single_sn=sn)
+        app.action_check_or_update(download=True, single_sn=sn, interactive=False)
         return
 
     app.run_interactive(skip_startup_check=args.no_startup_check)

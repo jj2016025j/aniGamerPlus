@@ -1,12 +1,49 @@
-"""四管道手機推播模組（ntfy / Discord / Telegram / LINE）與結構化追番報告產生器。"""
+"""四管道手機推播模組（ntfy / Discord / Telegram / LINE）與結構化分組報告產生器。"""
 
 from __future__ import annotations
 
 import json
 import urllib.error
 import urllib.request
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
+
+from .episode_fetcher import EpisodeInfo, format_episode_ranges
+
+
+@dataclass
+class DownloadedRecord:
+    title: str
+    episode: EpisodeInfo
+    resolution_label: str = ""  # 例如 "720P" / "1080P" / "1080P升級"
+
+
+def format_grouped_downloads(records: list[DownloadedRecord]) -> list[str]:
+    """
+    依作品與畫質標籤分組，並將連續集數壓縮為區間，避免長片名重複洗版：
+    - 單集：學生會也有洞！ 第 8 集 (720P)
+    - 連續多集：被放逐的作弊賦予魔術師享受隨心所欲的第二人生。 第 1~5 集 (720P)
+    """
+    if not records:
+        return []
+
+    groups: dict[tuple[str, str], list[EpisodeInfo]] = {}
+    order: list[tuple[str, str]] = []
+    for rec in records:
+        key = (rec.title, rec.resolution_label)
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(rec.episode)
+
+    lines: list[str] = []
+    for title, res_label in order:
+        eps = groups[(title, res_label)]
+        range_str = format_episode_ranges(eps, compact=False)
+        suffix = f" ({res_label})" if res_label else ""
+        lines.append(f"《{title}》{range_str}{suffix}")
+    return lines
 
 
 def format_check_digest(
@@ -44,26 +81,31 @@ def format_check_digest(
 
 
 def format_download_report(
-    downloaded: list[str],
+    downloaded: list[DownloadedRecord],
     failed: list[str],
     remaining: list[str],
+    interrupted: bool = False,
 ) -> tuple[str, str]:
-    """產生「下載任務結算報告」通知內容。"""
+    """產生「下載完成報告」或「下載中斷結算」通知內容（依作品分組＋區間壓縮）。"""
     now_str = datetime.now().strftime("%m/%d %H:%M")
-    title = f"動畫瘋下載完成報告 ({now_str})"
+    heading = "動畫瘋下載中斷結算" if interrupted else "動畫瘋下載完成報告"
+    title = f"{heading} ({now_str})"
     lines: list[str] = []
 
     if downloaded:
+        grouped_lines = format_grouped_downloads(downloaded)
         lines.append(f"【本次已下載 ({len(downloaded)} 集)】")
-        lines.extend(f"• {item}" for item in downloaded)
+        lines.extend(f"• {row}" for row in grouped_lines)
 
     if failed:
-        lines.append("")
+        if lines:
+            lines.append("")
         lines.append(f"【下載失敗／中斷 ({len(failed)} 集)】")
         lines.extend(f"• {item}" for item in failed)
 
     if remaining:
-        lines.append("")
+        if lines:
+            lines.append("")
         lines.append("【尚有未下載集數】")
         lines.extend(f"• {item}" for item in remaining)
 
@@ -136,7 +178,7 @@ class Notifier:
         req = urllib.request.Request(
             webhook,
             data=body,
-            headers={"Content-Type": "application/json", "User-Agent": "aniGamerPlus-Manager/1.4"},
+            headers={"Content-Type": "application/json", "User-Agent": "aniGamerPlus-Manager/1.4.2"},
             method="POST",
         )
         with urllib.request.urlopen(req, timeout=10):
@@ -207,7 +249,6 @@ class Notifier:
             return False, f"line：HTTP {exc.code} 失敗（{hint}）"
 
     def send(self, title: str, message: str) -> list[tuple[str, bool, str]]:
-        """對所有已啟用的管道逐一發送通知。"""
         active = self.enabled_providers
         if not active:
             return [("none", False, "所有推播管道目前皆為關閉狀態（可在 manager_config.json 的 notifications 區塊開啟）。")]

@@ -134,7 +134,12 @@ def remux_audio_for_quicktime(file_path: Path, replace_original: bool = True) ->
         "+faststart",
         str(temp_output),
     ]
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace")
+    popen_kw = {"stdout": subprocess.PIPE, "stderr": subprocess.PIPE, "text": True, "encoding": "utf-8", "errors": "replace"}
+    if hasattr(subprocess, "CREATE_NEW_PROCESS_GROUP"):
+        popen_kw["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        popen_kw["start_new_session"] = True
+    proc = subprocess.Popen(cmd, **popen_kw)
     try:
         _, stderr = proc.communicate()
     except KeyboardInterrupt:
