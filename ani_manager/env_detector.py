@@ -1,4 +1,4 @@
-"""跨平台環境自動偵測模組（Windows / macOS / Linux）。"""
+"""跨平台環境自動偵測模組（Windows / macOS / Linux，支援獨立倉庫與同目錄外掛模式）。"""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ class EnvironmentInfo:
     raw_os: str
     os_name: str
     root_dir: Path
+    anigamer_dir: Path
     anigamer_script: Path | None
     python_executable: Path
     bangumi_dir: Path
@@ -36,47 +37,83 @@ def configure_console_encoding() -> None:
                     pass
 
 
-def resolve_python_executable(root_dir: Path) -> Path:
-    """優先尋找專案目錄下的 .venv Python，避免跨環境缺套件。"""
-    candidates = [
-        root_dir / ".venv" / "Scripts" / "python.exe",  # Windows
-        root_dir / ".venv" / "bin" / "python",          # macOS / Linux
-        root_dir / "venv" / "Scripts" / "python.exe",
-        root_dir / "venv" / "bin" / "python",
+def resolve_anigamer_location(root_dir: Path, custom_anigamer_dir: str = "") -> tuple[Path, Path | None]:
+    """
+    自動尋找 aniGamerPlus.py 位置，支援兩種架構：
+    1. 同目錄外掛模式（與 aniGamerPlus.py 放在一起）
+    2. 獨立私人倉庫模式（aniGamerPlus 放在 vendor/aniGamerPlus 或自訂路徑）
+    """
+    candidates: list[Path] = []
+    if custom_anigamer_dir.strip():
+        p = Path(custom_anigamer_dir).expanduser()
+        candidates.append(p if p.is_absolute() else (root_dir / p).resolve())
+
+    candidates.extend(
+        [
+            root_dir,
+            root_dir / "vendor" / "aniGamerPlus",
+            root_dir / "aniGamerPlus",
+            root_dir.parent / "aniGamerPlus",
+        ]
+    )
+
+    for folder in candidates:
+        script = folder / "aniGamerPlus.py"
+        if script.is_file():
+            return folder.resolve(), script.resolve()
+
+    fallback_dir = candidates[0] if custom_anigamer_dir.strip() else root_dir
+    return fallback_dir.resolve(), None
+
+
+def resolve_python_executable(root_dir: Path, anigamer_dir: Path) -> Path:
+    """優先尋找 aniGamerPlus 目錄或管理端目錄下的 .venv Python。"""
+    search_roots = [anigamer_dir, root_dir]
+    rel_candidates = [
+        Path(".venv/Scripts/python.exe"),
+        Path(".venv/bin/python"),
+        Path("venv/Scripts/python.exe"),
+        Path("venv/bin/python"),
     ]
-    for candidate in candidates:
-        if candidate.is_file():
-            return candidate
+    for base in search_roots:
+        for rel in rel_candidates:
+            candidate = base / rel
+            if candidate.is_file():
+                return candidate
     return Path(sys.executable)
 
 
-def detect_environment(root_dir: Path | None = None, custom_bangumi_dir: str | None = None) -> EnvironmentInfo:
+def detect_environment(
+    root_dir: Path | None = None,
+    custom_bangumi_dir: str | None = None,
+    custom_anigamer_dir: str = "",
+) -> EnvironmentInfo:
     """偵測作業系統、aniGamerPlus 核心檔、虛擬環境、Cookie 與 FFmpeg 狀態。"""
     resolved_root = (root_dir or Path.cwd()).resolve()
     raw_os = platform.system()
     os_map = {"Windows": "Windows", "Darwin": "macOS", "Linux": "Linux"}
     os_name = os_map.get(raw_os, raw_os)
 
-    script_path = resolved_root / "aniGamerPlus.py"
-    anigamer_script = script_path if script_path.is_file() else None
+    anigamer_dir, anigamer_script = resolve_anigamer_location(resolved_root, custom_anigamer_dir)
 
     if custom_bangumi_dir:
         bangumi_dir = Path(custom_bangumi_dir).expanduser()
         if not bangumi_dir.is_absolute():
-            bangumi_dir = (resolved_root / bangumi_dir).resolve()
+            bangumi_dir = (anigamer_dir / bangumi_dir).resolve()
     else:
-        bangumi_dir = resolved_root / "bangumi"
+        bangumi_dir = anigamer_dir / "bangumi"
 
-    db_path = resolved_root / "aniGamer.db"
-    cookie_path = resolved_root / "cookie.txt"
-    has_cookie = cookie_path.is_file() and cookie_path.stat().st_size > 20
+    db_path = anigamer_dir / "aniGamer.db"
+    cookie_path = anigamer_dir / "cookie.txt"
+    has_cookie = cookie_path.is_file() and cookie_path.stat().st_size > 10
 
     return EnvironmentInfo(
         raw_os=raw_os,
         os_name=os_name,
         root_dir=resolved_root,
+        anigamer_dir=anigamer_dir,
         anigamer_script=anigamer_script,
-        python_executable=resolve_python_executable(resolved_root),
+        python_executable=resolve_python_executable(resolved_root, anigamer_dir),
         bangumi_dir=bangumi_dir,
         db_path=db_path,
         cookie_path=cookie_path,

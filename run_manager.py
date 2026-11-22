@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
-aniGamerPlus 模組化增量下載工具入口腳本。
-請將本檔、MANAGER_README.md 與 ani_manager/ 資料夾一併放入 aniGamerPlus 專案根目錄中執行。
+aniGamerPlus 模組化增量下載工具入口腳本 (v1.2)。
+支援兩種架構：
+1. 直接放在 aniGamerPlus 專案根目錄
+2. 放在獨立私人倉庫中，把原作者專案 clone 到 vendor/aniGamerPlus（或在 manager_config.json 指定 anigamer_dir）
 """
 
 from __future__ import annotations
@@ -10,28 +12,34 @@ import argparse
 from pathlib import Path
 
 from ani_manager.cli_ui import AnimeManagerApp
+from ani_manager.config_store import extract_sn_from_input
 from ani_manager.env_detector import configure_console_encoding
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="aniGamerPlus 模組化增量更新管理工具（自動過濾已下載、支援雙系統）"
+        description="aniGamerPlus 模組化增量更新管理工具 v1.2"
     )
     parser.add_argument(
         "--update",
         action="store_true",
-        help="非互動模式：立即檢查追番清單並只下載未下載的新集數",
+        help="非互動模式：檢查啟用中的追番清單並只下載缺漏/新集數",
     )
     parser.add_argument(
         "--check",
         action="store_true",
-        help="非互動模式：只檢查線上集數與本地進度差異，不下載",
+        help="非互動模式：只檢查線上集數與本地差異，不下載",
     )
     parser.add_argument(
         "--sn",
         type=str,
         default=None,
-        help="搭配 --update 或 --check，僅針對單一指定 SN 檢查/下載",
+        help="指定單一作品 SN 或動畫瘋網址，可搭配 --update / --check / --force",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="搭配 --sn，忽略所有去重紀錄直接強制下載該 SN 單集（適合測試 Cookie）",
     )
     parser.add_argument(
         "--fix-audio",
@@ -41,13 +49,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--test-notify",
         action="store_true",
-        help="發送一則測試通知到手機（需先於 manager_config.json 啟用）",
+        help="對所有已啟用的手機推播管道發送測試訊息",
     )
     parser.add_argument(
         "--root",
         type=str,
         default=None,
-        help="手動指定 aniGamerPlus.py 所在目錄（預設為腳本所在目錄）",
+        help="手動指定工作根目錄（預設為腳本所在目錄）",
     )
     return parser.parse_args()
 
@@ -56,6 +64,7 @@ def main() -> None:
     configure_console_encoding()
     args = parse_args()
     root_dir = Path(args.root).resolve() if args.root else Path(__file__).resolve().parent
+    sn = extract_sn_from_input(args.sn) if args.sn else None
 
     app = AnimeManagerApp(root_dir=root_dir)
 
@@ -69,14 +78,19 @@ def main() -> None:
         app.action_audio_check_and_fix(auto_fix=True)
         return
 
+    if args.force and sn:
+        app.show_banner()
+        app.action_check_or_update(download=True, single_sn=sn, force_single_episode=True)
+        return
+
     if args.check:
         app.show_banner()
-        app.action_check_or_update(download=False, single_sn=args.sn)
+        app.action_check_or_update(download=False, single_sn=sn)
         return
 
     if args.update:
         app.show_banner()
-        app.action_check_or_update(download=True, single_sn=args.sn)
+        app.action_check_or_update(download=True, single_sn=sn)
         return
 
     app.run_interactive()

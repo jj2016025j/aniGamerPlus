@@ -1,4 +1,4 @@
-"""三層去重與增量過濾模組（JSON 紀錄 + aniGamer.db + bangumi 實體檔案掃描）。"""
+"""去重與增量過濾模組（支援「依實體檔案」與「檔案+歷史+DB」兩種模式）。"""
 
 from __future__ import annotations
 
@@ -55,7 +55,7 @@ def parse_resolution_int(res_text: str | int | None) -> int:
 
 
 class HistoryTracker:
-    """整合本地 JSON、aniGamer.db 與實體影片檔，精準過濾已下載集數。"""
+    """支援 file_only（刪影片就自動重抓）與 file_and_history（外接硬碟歸檔防重抓）。"""
 
     def __init__(self, history_path: Path, db_path: Path, bangumi_dir: Path) -> None:
         self.history_path = history_path
@@ -91,8 +91,20 @@ class HistoryTracker:
         }
         self.save()
 
+    def clear_history_by_sns(self, sns: list[str]) -> int:
+        """清除指定 SN 的本地 JSON 紀錄（測試重抓用）。"""
+        removed = 0
+        store = self._data.get("downloaded_sns", {})
+        for sn in sns:
+            if str(sn) in store:
+                del store[str(sn)]
+                removed += 1
+        if removed:
+            self.save()
+        return removed
+
     def read_anigamer_db_sns(self) -> dict[str, int]:
-        """安全唯讀 aniGamerPlus 原生 aniGamer.db（動態探測資料表結構，避免版本差異報錯）。"""
+        """安全唯讀 aniGamerPlus 原生 aniGamer.db。"""
         found: dict[str, int] = {}
         if not self.db_path.is_file():
             return found
@@ -168,11 +180,16 @@ class HistoryTracker:
         target_resolution: str | int = "1080",
         upgrade_lower_resolution: bool = False,
         anime_name_hint: str = "",
+        dedup_mode: str = "file_only",
     ) -> EpisodeDiffResult:
-        """比對線上集數與本地三層紀錄，回傳已下載、未下載、可升級畫質清單。"""
+        """
+        比對線上集數與本地狀態：
+        - dedup_mode == "file_only"：只以 bangumi/ 實體影片是否存在為準（刪掉檔案就會自動重抓）。
+        - dedup_mode == "file_and_history"：三層比對（實體檔 + download_history.json + aniGamer.db）。
+        """
         target_res = parse_resolution_int(target_resolution)
-        json_sns: dict = self._data.get("downloaded_sns", {})
-        db_sns = self.read_anigamer_db_sns()
+        json_sns: dict = self._data.get("downloaded_sns", {}) if dedup_mode == "file_and_history" else {}
+        db_sns = self.read_anigamer_db_sns() if dedup_mode == "file_and_history" else {}
         local_files = self.scan_local_files()
 
         file_index: dict[tuple[str, str], LocalFileRecord] = {}
@@ -199,15 +216,15 @@ class HistoryTracker:
                 matched = file_index.get((norm_t, ep_norm))
                 if matched:
                     found_res = matched.resolution
-                    if ep.sn not in json_sns:
+                    if ep.sn not in self._data.get("downloaded_sns", {}):
                         self.mark_downloaded(ep, matched.resolution, matched.file_path)
                     break
 
-            if found_res is None and ep.sn in json_sns:
-                found_res = parse_resolution_int(json_sns[ep.sn].get("resolution"))
-
-            if found_res is None and ep.sn in db_sns:
-                found_res = db_sns[ep.sn]
+            if found_res is None and dedup_mode == "file_and_history":
+                if ep.sn in json_sns:
+                    found_res = parse_resolution_int(json_sns[ep.sn].get("resolution"))
+                elif ep.sn in db_sns:
+                    found_res = db_sns[ep.sn]
 
             if found_res is None:
                 missing_episodes.append(ep)

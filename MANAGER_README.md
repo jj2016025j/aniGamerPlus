@@ -1,128 +1,90 @@
-# aniGamerPlus 模組化增量下載管理工具 (v1.1)
+# aniGamerPlus 模組化增量下載管理工具 (v1.2)
 
-本工具為 `miyouzi/aniGamerPlus` 的外掛式模組化管理層。**不覆蓋原本的 `aniGamerPlus.py` 與原專案的 `README.md`**，完整保留原專案核心與 Git 同步能力，並將各功能拆成獨立模組。
+本工具為 `miyouzi/aniGamerPlus` 的獨立模組化管理層。**不修改原本的 `aniGamerPlus.py` 與 `README.md`**，且同時支援「放進原目錄」與「獨立建立私人 GitHub 倉庫」兩種架構。
 
 ---
 
-## 1. 目錄與模組架構
+## 1. 兩種部署架構（推薦方案 B，不用公開 Fork）
 
-解壓縮後直接放入 `aniGamerPlus/` 根目錄（與 `aniGamerPlus.py` 同層）：
+### 方案 A：放進原本的 `aniGamerPlus/` 資料夾
+將本壓縮包直接解壓縮到 `aniGamerPlus/` 根目錄即可執行。
 
+### 方案 B：獨立私人倉庫（免 Fork、免公開、零衝突）
+在自己的 GitHub 建一個全新的 **Private（私人）倉庫**，目錄結構如下：
 ```text
-aniGamerPlus/
-├── aniGamerPlus.py          # 原生核心（不修改）
-├── README.md                # 原專案文件（不修改，避免 Git 衝突）
-├── run_manager.py           # 本工具入口（互動選單 / 命令列參數）
-├── MANAGER_README.md        # 本工具使用說明
-├── manager_config.json      # 首次執行自動生成（追番清單與設定，勿上傳 Git）
-├── download_history.json    # 首次執行自動生成（已下載紀錄，勿上傳 Git）
-└── ani_manager/             # 各功能獨立模組
-    ├── env_detector.py      # 自動辨識 Windows / macOS / Linux、.venv、FFmpeg、Cookie
-    ├── config_store.py      # 追番清單與設定讀寫
-    ├── cookie_manager.py    # VIP Cookie 嚴格防呆驗證、剪貼簿直寫、線上狀態檢查、Playwright 自動抓取
-    ├── episode_fetcher.py   # 解析動畫瘋頁面，抓出該作品最新上架的所有集數與 SN
-    ├── history_tracker.py   # 三層去重引擎（bangumi 實體檔 + JSON + aniGamer.db）
-    ├── downloader.py        # 呼叫原生 aniGamerPlus.py，僅抓缺漏集數 (-m single)
-    ├── audio_tools.py       # ffprobe 音軌檢測 + ffmpeg 無損重寫 AAC（修 QuickTime 無聲）
-    ├── notifier.py          # 手機推播模組（支援 ntfy / Discord / Telegram）
-    └── cli_ui.py            # 終端互動選單（自動套用 rich，未裝時降級純文字）
+my-anime-manager/              # 你的私人倉庫
+├── run_manager.py
+├── MANAGER_README.md
+├── .gitignore                 # 忽略 vendor/、cookie.txt、*.json、.venv/
+├── ani_manager/               # 本工具所有模組
+└── vendor/
+    └── aniGamerPlus/          # git clone https://github.com/miyouzi/aniGamerPlus.git
 ```
+`env_detector.py` 會自動偵測 `vendor/aniGamerPlus/aniGamerPlus.py`（也可在 `manager_config.json` 的 `anigamer_dir` 指定電腦上任何路徑）。原作者更新時只需進 `vendor/aniGamerPlus` 跑 `git pull`。
 
 ---
 
-## 2. 啟動方式（Windows / macOS）
+## 2. 安裝選配套件（解決 macOS `pip` 被擋與 `rich` 黃線問題）
 
-### macOS / Linux
+若你的 `.venv` 是透過 `uv venv` 建立的，環境內預設不含 `pip` 指令，直接打 `pip install` 會誤觸發 Homebrew 系統 Python 的 PEP 668 保護。請改用 **`uv pip install`**：
+
 ```bash
-cd /Users/leechiensheng/開發/錄影/anime/aniGamerPlus
-.venv/bin/python run_manager.py
-```
+# 安裝美化介面套件 rich 與半自動抓 Cookie 用的 playwright
+uv pip install rich playwright
 
-### Windows (PowerShell)
-```powershell
-cd <你的aniGamerPlus路徑>
-python run_manager.py
+# 下載 Playwright 專用獨立 Chromium（只在需要使用「半自動抓 Cookie」時需要）
+.venv/bin/playwright install chromium
 ```
+*(Windows 請用 `.venv\Scripts\playwright install chromium`。安裝完 `rich` 後，若 VS Code 仍有黃線，按 `Cmd+Shift+P` 選 `Python: Select Interpreter` 指向 `.venv/bin/python` 即可。)*
 
 ---
 
-## 3. 常用命令列指令
+## 3. 核心功能與模組對照
 
-| 需求 | 指令 |
+| 模組 | 功能說明 |
 |---|---|
-| 進入互動選單 | `python run_manager.py`（macOS 用 `.venv/bin/python run_manager.py`） |
-| **一鍵增量更新**（自動跳過已下載，只抓新集數） | `python run_manager.py --update` |
-| 僅檢查是否有新集數（不下載） | `python run_manager.py --check` |
-| 僅檢查並下載指定 SN 作品 | `python run_manager.py --update --sn 51813` |
-| 掃描並修復影片音軌（QuickTime 無聲） | `python run_manager.py --fix-audio` |
-| 發送測試推播到手機 | `python run_manager.py --test-notify` |
+| `env_detector.py` | 跨平台辨識 Windows / macOS / Linux、自動尋找 `aniGamerPlus.py` 與 `.venv` |
+| `config_store.py` | 讀寫 `manager_config.json`，支援貼上動畫瘋網址自動抽出 SN、各番獨立開關 |
+| `cookie_manager.py` | 防呆攔截非 Cookie 雜訊、**允許訪客與非 VIP 登入帳號**、剪貼簿直寫、Playwright 抓取 |
+| `episode_fetcher.py` | 解析動畫瘋頁面自動抓取作品標題與最新上架集數清單 |
+| `history_tracker.py` | 支援兩種去重模式：`file_only`（刪影片即重抓）與 `file_and_history`（歸檔防重抓） |
+| `downloader.py` | 呼叫原生 `aniGamerPlus.py -m single`，維持優先 1080P（非 VIP 自動降級 720P） |
+| `audio_tools.py` | `ffprobe` 檢測音軌與 `ffmpeg` 無損重洗 AAC（修 QuickTime 無聲） |
+| `notifier.py` | 多管道手機推播（`ntfy` / `Discord` / `Telegram` 可任意同時啟用） |
+| `cli_ui.py` | 首頁面板直接顯示目前預設下載作品、畫質策略、Cookie 狀態與去重模式 |
 
 ---
 
-## 4. VIP Cookie 管理（選單 5）
+## 4. 刪除影片重測怎麼運作？
 
-內建 4 種操作且具備**防呆攔截**（若剪貼簿為空、複製到網址／文字／一般訪客 Cookie，或缺少 `HttpOnly` 驗證欄位 `BAHARUNE`/`BAHAENUR`，會直接拒絕寫入並保留原本的 `cookie.txt`）：
-
-1. **剪貼簿防呆寫入並立即刷新驗證（推薦）**：從瀏覽器複製完 Cookie 後按 `1`，自動清洗（並自動移除含中文的非 ASCII `BAHANICK` 避免編碼報錯）、寫入 `cookie.txt`、刷新環境並線上驗證登入狀態。
-2. **純刷新重新讀取並驗證**：手動改完 `cookie.txt` 後按 `2`，立刻重讀檔案並顯示驗證結果。
-3. **Playwright 半自動腳本抓取（免開 F12）**：自動彈出獨立無痕瀏覽器前往巴哈登入頁，登入後自動擷取含 `HttpOnly` 的完整 Cookie 並直接關閉視窗（不按登出，保留 Session）。
-   * 若尚未安裝 Playwright，執行一次即可啟用：
-     ```bash
-     pip install playwright
-     playwright install chromium
-     ```
-4. **開啟文字編輯器手動編輯**。
+* **預設 `dedup_mode: "file_only"`**：只要把 `bangumi/` 裡的某幾集影片檔刪掉，再次檢查更新就會自動偵測缺漏並重新下載，**不需要手動清歷史紀錄**。
+* 若未來把看完的影片搬去外接硬碟歸檔、不想被重抓，進選單 **3 → 4** 切換成 `file_and_history` 即可。
+* 若連影片都不想刪、只想強制重抓單一 SN 測試 Cookie，可選主選單 **`4` → `2`**，或直接執行：
+  ```bash
+  .venv/bin/python run_manager.py --sn 51813 --force
+  ```
 
 ---
 
-## 5. 手機推播通知設定（`notifier.py`）
+## 5. 多管道手機推播設定（可同時啟用多個）
 
-當執行 `--update` 或選單下載完新集數後，可自動推播結果到手機。打開 `manager_config.json` 修改 `notification` 區塊即可：
+打開 `manager_config.json`，在 `notifications` 區塊把想用的管道 `enabled` 改成 `true`（可三選一、二選二或三個全開）：
 
-### 方案 A：ntfy（最簡單、免費、免申請帳號與 Token）
-1. 手機安裝免費 App **ntfy**（Android / iOS 皆有）。
-2. 在 App 內點 `+` 訂閱一個自己取的隨機頻道名稱（例如 `ani-notify-7k9x2m`，取複雜一點避免跟別人撞名）。
-3. 打開 `manager_config.json` 改成：
-   ```json
-   "notification": {
-     "enabled": true,
-     "provider": "ntfy",
-     "endpoint": "https://ntfy.sh/ani-notify-7k9x2m",
-     "token": "",
-     "chat_id": ""
-   }
-   ```
-4. 執行 `python run_manager.py --test-notify`（或在選單按 `7`），手機立即收到測試通知即完成。
-
-### 方案 B：Discord Webhook（有裝 Discord 就不用多裝 App）
-1. 在自己的私人 Discord 伺服器頻道 → **編輯頻道 → 整合 → Webhook → 建立並複製 URL**。
-2. 在 `manager_config.json` 填入：
-   ```json
-   "notification": {
-     "enabled": true,
-     "provider": "discord",
-     "endpoint": "https://discord.com/api/webhooks/你的網址",
-     "token": "",
-     "chat_id": ""
-   }
-   ```
-
-### 方案 C：Telegram Bot
-填入 `"provider": "telegram"`、BotFather 給的 `"token"` 與自己的 `"chat_id"`。
-
----
-
-## 6. Git 上傳注意事項（`.gitignore`）
-
-請務必在 `.gitignore` 加入以下規則，避免個人 Cookie 與紀錄外洩到公開 GitHub Fork：
-
-```gitignore
-cookie.txt
-download_history.json
-manager_config.json
-aniGamer.db
-bangumi/
-.venv/
-__pycache__/
-*.pyc
+```json
+"notifications": {
+  "ntfy": {
+    "enabled": true,
+    "endpoint": "https://ntfy.sh/你的隨機頻道名"
+  },
+  "discord": {
+    "enabled": true,
+    "webhook_url": "https://discord.com/api/webhooks/你的Webhook網址"
+  },
+  "telegram": {
+    "enabled": false,
+    "token": "你的BotToken",
+    "chat_id": "你的ChatID"
+  }
+}
 ```
+存檔後進主選單按 **`8`**（或跑 `--test-notify`）即可一次測試所有已啟用的管道。

@@ -1,4 +1,4 @@
-"""巴哈姆特 VIP Cookie 驗證、剪貼簿寫入、重讀與 Playwright 自動抓取模組。"""
+"""巴哈姆特 Cookie 防呆驗證（允許訪客與非 VIP）、剪貼簿寫入、重讀與 Playwright 自動抓取模組。"""
 
 from __future__ import annotations
 
@@ -13,7 +13,6 @@ from pathlib import Path
 
 COOKIE_KEY_RE = re.compile(r"^[A-Za-z0-9_.\-]+$")
 
-# 巴哈姆特登入憑證關鍵欄位（BAHARUNE / BAHAENUR 多為 HttpOnly）
 BAHA_AUTH_KEYS = {"BAHAID", "BAHARUNE", "BAHAENUR"}
 BAHA_KNOWN_KEYS = {
     "BAHAID",
@@ -25,6 +24,8 @@ BAHA_KNOWN_KEYS = {
     "ANIME_SIGN",
     "NOLOGINUSER",
     "CKBAHAAD",
+    "CKBAHAAD",
+    "PHPSESSID",
 }
 NON_ASCII_STRIP_KEYS = {"BAHANICK", "MB_BAHANICK"}
 
@@ -32,7 +33,7 @@ NON_ASCII_STRIP_KEYS = {"BAHANICK", "MB_BAHANICK"}
 @dataclass
 class CookieValidationResult:
     valid: bool
-    is_logged_in: bool
+    tier: str  # "logged_in" | "partial_login" | "guest" | "invalid"
     cleaned_cookie: str = ""
     baha_id_masked: str = ""
     pair_count: int = 0
@@ -51,6 +52,8 @@ class CookieOnlineStatus:
 def mask_account(value: str) -> str:
     """遮罩帳號 ID，避免終端畫面暴露完整帳號。"""
     v = value.strip()
+    if not v:
+        return "訪客"
     if len(v) <= 2:
         return "*" * len(v)
     if len(v) <= 5:
@@ -102,25 +105,25 @@ def open_cookie_in_editor(cookie_path: Path, raw_os: str) -> bool:
 
 
 def validate_and_sanitize_cookie(raw_text: str) -> CookieValidationResult:
-    """嚴格驗證並清洗 Cookie 字串，避免複製到網址、程式碼或空字串時誤覆蓋舊 cookie.txt。"""
+    """
+    驗證並清洗 Cookie：
+    - 嚴格攔截非 Cookie 雜訊（空值、網址、程式碼、其他網站 Cookie），避免誤覆蓋舊檔。
+    - 允許「已登入帳號（含非 VIP）」與「巴哈一般訪客 Cookie」通過，並清楚標示狀態等級。
+    """
     if not raw_text or not raw_text.strip():
-        return CookieValidationResult(valid=False, is_logged_in=False, reason="內容為空（尚未複製內容或檔案為空）。")
+        return CookieValidationResult(valid=False, tier="invalid", reason="內容為空（尚未複製內容或檔案為空）。")
 
     stripped = raw_text.strip()
-
-    # 排除明顯不是 Cookie 的剪貼簿內容（網址、JSON、HTML、指令）
     lower_start = stripped.lower()
-    if lower_start.startswith(("http://", "https://", "{", "[", "<", "git ", "python", "pip ", "brew ")):
+    if lower_start.startswith(("http://", "https://", "{", "[", "<", "git ", "python", "pip ", "uv ", "brew ")):
         return CookieValidationResult(
             valid=False,
-            is_logged_in=False,
+            tier="invalid",
             reason="內容看起來像是網址、程式碼或指令，而不是 Cookie 字串，已拒絕寫入。",
         )
 
-    # 整理換行與開頭的 cookie: 前綴
     lines = [line.strip() for line in stripped.splitlines() if line.strip()]
     if len(lines) > 1:
-        # 若不小心多選到其他 HTTP Header 行，只嘗試抽出 Cookie 行
         cookie_line = next((ln for ln in lines if ln.lower().startswith("cookie:")), None)
         joined = cookie_line if cookie_line else "; ".join(lines)
     else:
@@ -129,10 +132,10 @@ def validate_and_sanitize_cookie(raw_text: str) -> CookieValidationResult:
     if joined.lower().startswith("cookie:"):
         joined = joined.split(":", 1)[1].strip()
 
-    if len(joined) < 25 or "=" not in joined:
+    if len(joined) < 15 or "=" not in joined:
         return CookieValidationResult(
             valid=False,
-            is_logged_in=False,
+            tier="invalid",
             reason="字串長度過短或缺少 key=value 結構，不是有效的 Cookie。",
         )
 
@@ -148,7 +151,6 @@ def validate_and_sanitize_cookie(raw_text: str) -> CookieValidationResult:
         val = v.strip()
         if not key or not COOKIE_KEY_RE.match(key):
             continue
-        # 修正 aniGamerPlus 已知坑：中文暱稱含非 ASCII 字元可能導致 HTTP 標頭編碼異常
         if key.upper() in NON_ASCII_STRIP_KEYS and not val.isascii():
             warnings.append(f"已自動移除含非 ASCII 字元的 {key}（避免 aniGamerPlus 標頭編碼失敗）")
             continue
@@ -157,67 +159,76 @@ def validate_and_sanitize_cookie(raw_text: str) -> CookieValidationResult:
             continue
         valid_pairs.append((key, val))
 
-    if len(valid_pairs) < 2:
+    if len(valid_pairs) < 1:
         return CookieValidationResult(
             valid=False,
-            is_logged_in=False,
-            reason="解析出的有效 Cookie 欄位少於 2 組，疑似複製到其他文字，已拒絕寫入。",
+            tier="invalid",
+            reason="未解析出有效的 Cookie 欄位，疑似複製到一般文字，已拒絕寫入。",
         )
 
     key_map = {k.upper(): v for k, v in valid_pairs}
-    matched_known = [k for k in key_map if k in BAHA_KNOWN_KEYS]
+    matched_known = [k for k in key_map if k in BAHA_KNOWN_KEYS or k.startswith("BAHA") or k.startswith("CKBAHA")]
     if not matched_known:
         return CookieValidationResult(
             valid=False,
-            is_logged_in=False,
-            reason="未偵測到任何巴哈姆特相關欄位（如 BAHAID / BAHARUNE / BAHAENUR），疑似複製到其他網站或一般文字，已保留原檔案不覆蓋。",
+            tier="invalid",
+            reason="未偵測到任何巴哈姆特相關欄位（如 BAHAID / BAHARUNE / nologinuser / ckBahaAd），疑似複製到其他網站或一般文字，已保留原檔不覆蓋。",
         )
 
     matched_auth = sorted(k for k in BAHA_AUTH_KEYS if k in key_map and key_map[k])
     has_id = "BAHAID" in matched_auth
     has_token = ("BAHARUNE" in matched_auth) or ("BAHAENUR" in matched_auth)
-    is_logged_in = has_id and has_token
+    cleaned = "; ".join(f"{k}={v}" for k, v in valid_pairs)
 
-    if not is_logged_in:
-        if has_id and not has_token:
-            return CookieValidationResult(
-                valid=False,
-                is_logged_in=False,
-                matched_auth_keys=matched_auth,
-                reason="雖偵測到 BAHAID，但缺少 HttpOnly 驗證欄位（BAHARUNE / BAHAENUR）。請確認是從 DevTools -> Network -> Request Headers 複製，而非 Console 的 document.cookie。",
-            )
+    if has_id and has_token:
         return CookieValidationResult(
-            valid=False,
-            is_logged_in=False,
+            valid=True,
+            tier="logged_in",
+            cleaned_cookie=cleaned,
+            baha_id_masked=mask_account(key_map.get("BAHAID", "")),
+            pair_count=len(valid_pairs),
             matched_auth_keys=matched_auth,
-            reason="這是「未登入訪客」的巴哈 Cookie（缺少 BAHAID 與登入憑證），已拒絕寫入以避免覆蓋原設定。",
+            warnings=warnings,
+            reason="已登入巴哈帳號 Cookie（驗證通過，日後升級 VIP 可直接優先抓 1080P）",
         )
 
-    cleaned = "; ".join(f"{k}={v}" for k, v in valid_pairs)
-    baha_id_masked = mask_account(key_map.get("BAHAID", ""))
+    if has_id and not has_token:
+        warnings.append("偵測到 BAHAID 但缺少 HttpOnly 憑證 (BAHARUNE/BAHAENUR)；若要走 VIP 驗證請改從 Network -> Request Headers 複製。")
+        return CookieValidationResult(
+            valid=True,
+            tier="partial_login",
+            cleaned_cookie=cleaned,
+            baha_id_masked=mask_account(key_map.get("BAHAID", "")),
+            pair_count=len(valid_pairs),
+            matched_auth_keys=matched_auth,
+            warnings=warnings,
+            reason="不完整登入 Cookie（缺少 HttpOnly 欄位，實際下載將視為訪客）",
+        )
 
+    # 允許巴哈一般訪客 Cookie 通過
+    warnings.append("此為巴哈一般訪客 Cookie（未登入帳號）；下載時將自動走免費 720P + 廣告流程。")
     return CookieValidationResult(
         valid=True,
-        is_logged_in=True,
+        tier="guest",
         cleaned_cookie=cleaned,
-        baha_id_masked=baha_id_masked,
+        baha_id_masked="訪客",
         pair_count=len(valid_pairs),
         matched_auth_keys=matched_auth,
         warnings=warnings,
-        reason="驗證通過",
+        reason="巴哈一般訪客 Cookie（已接受寫入）",
     )
 
 
 def inspect_cookie_file(cookie_path: Path) -> CookieValidationResult:
-    """重新讀取並驗證現有 cookie.txt。"""
+    """純本地讀取並驗證現有 cookie.txt（不對伺服器發送請求）。"""
     if not cookie_path.is_file():
-        return CookieValidationResult(valid=False, is_logged_in=False, reason=f"找不到檔案：{cookie_path}")
+        return CookieValidationResult(valid=False, tier="invalid", reason=f"找不到檔案：{cookie_path}")
     raw = cookie_path.read_text(encoding="utf-8", errors="ignore")
     return validate_and_sanitize_cookie(raw)
 
 
 def verify_cookie_online(cookie_str: str, timeout: int = 10) -> CookieOnlineStatus:
-    """輕量發送請求至動畫瘋首頁，確認 Cookie 是否被伺服器承認為登入 / VIP 狀態。"""
+    """僅於手動更新或刷新時發送單次輕量請求確認線上狀態（不於主選單循環自動發送）。"""
     url = "https://ani.gamer.com.tw/"
     headers = {
         "User-Agent": (
@@ -245,35 +256,34 @@ def verify_cookie_online(cookie_str: str, timeout: int = 10) -> CookieOnlineStat
             return CookieOnlineStatus(
                 checked=False,
                 status="blocked",
-                detail="線上驗證遭 Cloudflare 攔截 (HTTP 403)，但本地 Cookie 格式正確，將於實際下載時由 aniGamerPlus 驗證。",
+                detail="線上檢查遭 Cloudflare 攔截 (HTTP 403)，但不影響本地 cookie.txt，將於實際下載時由 aniGamerPlus 驗證。",
             )
         if status_code != 200:
             return CookieOnlineStatus(checked=False, status="error", detail=f"伺服器回應 HTTP {status_code}")
 
-        # 檢查動畫瘋頁面的登入與付費狀態特徵
         has_logout = ("logout" in body.lower()) or ("登出" in body)
         is_vip_hint = bool(
             re.search(r"vip\s*[:=]\s*(?:true|1)|is_vip[\"']?\s*[:=]\s*(?:true|1)|付費會員|動畫瘋\s*VIP", body, re.IGNORECASE)
         )
         if is_vip_hint and has_logout:
-            return CookieOnlineStatus(checked=True, status="vip", detail="線上驗證成功：已登入且偵測到 VIP 狀態。")
+            return CookieOnlineStatus(checked=True, status="vip", detail="線上驗證成功：已登入且偵測到 VIP 權限（優先 1080P、免廣告）。")
         if has_logout:
             return CookieOnlineStatus(
                 checked=True,
                 status="logged_in",
-                detail="線上驗證成功：巴哈帳號已登入（首頁未直接顯示 VIP 標記，實際畫質權限將於下載時確認）。",
+                detail="線上驗證成功：已登入一般巴哈帳號（非 VIP 將自動降級 720P，日後升級 VIP 免改設定直接生效）。",
             )
         return CookieOnlineStatus(
             checked=True,
             status="guest",
-            detail="線上回應顯示為未登入狀態（Cookie 可能已過期或剛在瀏覽器按了登出）。",
+            detail="線上狀態：訪客 / 未登入（下載時將自動走免費 720P + 廣告流程）。",
         )
     except urllib.error.HTTPError as exc:
         if exc.code == 403:
             return CookieOnlineStatus(
                 checked=False,
                 status="blocked",
-                detail="線上驗證遭 Cloudflare 攔截 (HTTP 403)，但本地 Cookie 格式正確，將於實際下載時由 aniGamerPlus 驗證。",
+                detail="線上檢查遭 Cloudflare 攔截 (HTTP 403)，但不影響本地 cookie.txt，將於實際下載時由 aniGamerPlus 驗證。",
             )
         return CookieOnlineStatus(checked=False, status="error", detail=f"HTTP 錯誤 ({exc.code})")
     except Exception as exc:
@@ -287,16 +297,16 @@ def write_cookie_file(cookie_path: Path, cleaned_cookie: str) -> None:
 def capture_cookie_via_playwright(cookie_path: Path, timeout_seconds: int = 180) -> tuple[bool, str, CookieValidationResult | None]:
     """
     半自動腳本抓取：開啟獨立無痕視窗讓使用者登入巴哈姆特，
-    偵測登入完成後自動擷取含 HttpOnly 的完整 Cookie 並關閉視窗（不按登出，保留 Session）。
+    偵測登入完成後自動擷取含 HttpOnly 的完整 Cookie、寫入檔案並直接關閉視窗（不需再手動按刷新）。
     """
     try:
         from playwright.sync_api import sync_playwright  # type: ignore
     except ImportError:
         return (
             False,
-            "目前環境尚未安裝 Playwright。若要啟用自動抓 Cookie 功能，請在終端執行：\n"
-            "  pip install playwright\n"
-            "  playwright install chromium",
+            "目前環境尚未安裝 Playwright。若你的 .venv 是用 uv 建立的，請執行：\n"
+            "  uv pip install playwright\n"
+            "  .venv/bin/playwright install chromium  （Windows 用 .venv\\Scripts\\playwright install chromium）",
             None,
         )
 
@@ -322,12 +332,10 @@ def capture_cookie_via_playwright(cookie_path: Path, timeout_seconds: int = 180)
                 browser.close()
                 return False, f"超過 {timeout_seconds} 秒未偵測到完成登入，已自動取消。", None
 
-            # 順便造訪動畫瘋首頁，補齊動畫瘋網域專屬 Cookie（如 ANIME_SIGN）
             page.goto("https://ani.gamer.com.tw/", wait_until="domcontentloaded")
             time.sleep(2.0)
 
             all_cookies = context.cookies(["https://ani.gamer.com.tw", "https://gamer.com.tw"])
-            # 依名稱去重並組裝成標準 Cookie 標頭
             dedup: dict[str, str] = {}
             for c in all_cookies:
                 name = str(c.get("name", "")).strip()
@@ -335,8 +343,6 @@ def capture_cookie_via_playwright(cookie_path: Path, timeout_seconds: int = 180)
                 if name and val:
                     dedup[name] = val
             captured_str = "; ".join(f"{k}={v}" for k, v in dedup.items())
-
-            # 直接關掉獨立瀏覽器（不按登出），保留伺服器端 Session 有效
             browser.close()
     except Exception as exc:
         return False, f"Playwright 抓取過程發生錯誤：{exc}", None
@@ -346,4 +352,4 @@ def capture_cookie_via_playwright(cookie_path: Path, timeout_seconds: int = 180)
         return False, f"擷取到的 Cookie 未通過驗證：{validation.reason}", validation
 
     write_cookie_file(cookie_path, validation.cleaned_cookie)
-    return True, "已自動擷取並寫入 cookie.txt。", validation
+    return True, "已自動擷取、寫入 cookie.txt 並完成重新載入。", validation

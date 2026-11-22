@@ -28,7 +28,8 @@ class AniGamerDownloader:
     def _ensure_script(self) -> None:
         if not self.env.anigamer_script:
             raise FileNotFoundError(
-                f"在 {self.env.root_dir} 找不到 aniGamerPlus.py，請將本工具解壓縮並放在 aniGamerPlus 資料夾根目錄。"
+                f"找不到 aniGamerPlus.py（已檢查 {self.env.root_dir} 與 {self.env.anigamer_dir}）。"
+                "請將工具放入 aniGamerPlus 資料夾，或在 manager_config.json 設定 anigamer_dir。"
             )
 
     def build_command(self, sn: str, mode: str = "single", resolution: str | None = None) -> list[str]:
@@ -48,10 +49,10 @@ class AniGamerDownloader:
         return cmd
 
     def download_episode(self, episode: EpisodeInfo, resolution: str | None = None) -> DownloadResult:
-        """下載單一集數（-m single）。"""
+        """下載單一集數（-m single，會優先要求目標畫質，非 VIP 時由原程式自動降級 720P）。"""
         cmd = self.build_command(episode.sn, mode="single", resolution=resolution)
         try:
-            completed = subprocess.run(cmd, cwd=str(self.env.root_dir))
+            completed = subprocess.run(cmd, cwd=str(self.env.anigamer_dir))
             ok = completed.returncode == 0
             return DownloadResult(
                 sn=episode.sn,
@@ -72,9 +73,9 @@ class AniGamerDownloader:
             )
 
     def download_latest_direct(self, base_sn: str, resolution: str | None = None) -> int:
-        """直接委派 aniGamerPlus 下載最新一集（-m latest），作為無需預抓 HTML 的備用方案。"""
+        """直接委派 aniGamerPlus 下載最新一集（-m latest）。"""
         cmd = self.build_command(base_sn, mode="latest", resolution=resolution)
-        completed = subprocess.run(cmd, cwd=str(self.env.root_dir))
+        completed = subprocess.run(cmd, cwd=str(self.env.anigamer_dir))
         return completed.returncode
 
     def download_batch(
