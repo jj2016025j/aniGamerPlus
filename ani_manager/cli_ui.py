@@ -4,12 +4,21 @@ from __future__ import annotations
 
 import os
 import re
-import shutil
 import subprocess
 from pathlib import Path
 
 from .audio_tools import remux_audio_for_quicktime, scan_directory_audio
 from .config_store import AnimeWatchItem, ConfigStore, ManagerConfig
+from .cookie_manager import (
+    CookieValidationResult,
+    capture_cookie_via_playwright,
+    inspect_cookie_file,
+    open_cookie_in_editor,
+    read_clipboard,
+    validate_and_sanitize_cookie,
+    verify_cookie_online,
+    write_cookie_file,
+)
 from .downloader import AniGamerDownloader
 from .env_detector import EnvironmentInfo, detect_environment
 from .episode_fetcher import EpisodeFetchError, EpisodeInfo, fetch_anime_episodes
@@ -66,58 +75,6 @@ def _open_folder(path: Path, raw_os: str) -> None:
         pass
 
 
-def _read_clipboard(raw_os: str) -> tuple[bool, str]:
-    """跨平台讀取系統剪貼簿，避開終端機單行 1024 bytes 輸入上限。"""
-    cmds: list[list[str]] = []
-    if raw_os == "Darwin":
-        cmds.append(["pbpaste"])
-    elif raw_os == "Windows":
-        cmds.append(["powershell", "-NoProfile", "-Command", "Get-Clipboard -Raw"])
-    else:
-        for tool, args in (
-            ("wl-paste", ["wl-paste", "--no-newline"]),
-            ("xclip", ["xclip", "-selection", "clipboard", "-o"]),
-            ("xsel", ["xsel", "--clipboard", "--output"]),
-        ):
-            if shutil.which(tool):
-                cmds.append(args)
-
-    for cmd in cmds:
-        try:
-            proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5)
-            if proc.returncode == 0:
-                return True, proc.stdout
-        except Exception:
-            continue
-
-    return False, "無法自動讀取剪貼簿（請改用編輯器手動開啟貼上）。"
-
-
-def _open_text_file(path: Path, raw_os: str) -> bool:
-    """用系統預設文字編輯器開啟檔案。"""
-    try:
-        if not path.exists():
-            path.write_text("", encoding="utf-8")
-        if raw_os == "Darwin":
-            subprocess.run(["open", "-e", str(path)], check=False)
-        elif raw_os == "Windows":
-            subprocess.Popen(["notepad.exe", str(path)])
-        else:
-            subprocess.run(["xdg-open", str(path)], check=False)
-        return True
-    except Exception:
-        return False
-
-
-def _sanitize_cookie(raw_text: str) -> str:
-    """清理前綴與換行，整理成單行 Cookie 字串。"""
-    lines = [line.strip() for line in raw_text.strip().splitlines() if line.strip()]
-    joined = "; ".join(lines) if len(lines) > 1 and "=" in lines[0] else "".join(lines)
-    if joined.lower().startswith("cookie:"):
-        joined = joined.split(":", 1)[1].strip()
-    return joined.strip()
-
-
 class AnimeManagerApp:
     """串接各獨立模組的主控制器。"""
 
@@ -143,21 +100,57 @@ class AnimeManagerApp:
             bangumi_dir=self.env.bangumi_dir,
         )
         self.downloader = AniGamerDownloader(self.env)
+        self.notifier = Notifier(self.config.notification)
+
+    def _print_cookie_result(self, result: CookieValidationResult, run_online_check: bool = True) -> None:
+        """顯示 Cookie 驗證與刷新後的結果（遮罩敏感值）。"""
+        if not result.valid:
+            _print(f"[bold red]Cookie 檢查未通過：[/bold red]{result.reason}")
+            return
+
+        keys_str = ", ".join(result.matched_auth_keys)
+        _print(
+            f"[bold green]本地格式有效[/bold green] ｜ "
+            f"帳號：[cyan]{result.baha_id_masked}[/cyan] ｜ "
+            f"欄位數：{result.pair_count} ｜ "
+            f"關鍵憑證：[green]{keys_str}[/green] ｜ "
+            f"總長度：{len(result.cleaned_cookie)} 字元"
+        )
+        for w in result.warnings:
+            _print(f"  [yellow]提醒：{w}[/yellow]")
+
+        if run_online_check:
+            _print("[dim]正在連線動畫瘋確認登入狀態...[/dim]")
+            online = verify_cookie_online(result.cleaned_cookie)
+            color = {"vip": "green", "logged_in": "green", "blocked": "yellow", "guest": "red", "error": "yellow"}.get(
+                online.status, "white"
+            )
+            _print(f"  [{color}]{online.detail}[/{color}]")
 
     def show_banner(self) -> None:
         core_ok = "[green]已偵測[/green]" if self.env.anigamer_script else "[red]找不到 aniGamerPlus.py[/red]"
-        vip_ok = "[green]已設定 cookie.txt[/green]" if self.env.has_cookie else "[yellow]未設定 (免費 720P + 廣告)[/yellow]"
+        if self.env.has_cookie:
+            c_check = inspect_cookie_file(self.env.cookie_path)
+            if c_check.valid:
+                vip_ok = f"[green]已載入 ({c_check.baha_id_masked})[/green]"
+            else:
+                vip_ok = "[red]cookie.txt 格式異常[/red]"
+        else:
+            vip_ok = "[yellow]未設定 (免費 720P + 廣告)[/yellow]"
         ff_ok = "[green]已就緒[/green]" if self.env.has_ffmpeg else "[red]未安裝[/red]"
+        notify_ok = f"[green]{self.notifier.provider}[/green]" if self.notifier.enabled else "[dim]關閉[/dim]"
+
         body = (
             f"[bold]系統：[/bold]{self.env.os_name}   "
             f"[bold]核心：[/bold]{core_ok}   "
             f"[bold]VIP：[/bold]{vip_ok}   "
-            f"[bold]FFmpeg：[/bold]{ff_ok}\n"
+            f"[bold]FFmpeg：[/bold]{ff_ok}   "
+            f"[bold]通知：[/bold]{notify_ok}\n"
             f"[bold]Python：[/bold]{self.env.python_executable}\n"
             f"[bold]下載目錄：[/bold]{self.env.bangumi_dir}"
         )
         if HAS_RICH and console:
-            console.print(Panel(body, title="aniGamerPlus 模組化增量管理工具", border_style="cyan"))
+            console.print(Panel(body, title="aniGamerPlus 模組化增量管理工具 v1.1", border_style="cyan"))
         else:
             print("=" * 60)
             _print(body)
@@ -251,7 +244,9 @@ class AnimeManagerApp:
         if downloaded_summary:
             summary_text = "本次新下載：" + "、".join(downloaded_summary)
             _print(f"\n[bold green]{summary_text}[/bold green]")
-            self.notifier.send("動畫瘋下載完成", summary_text)
+            ok, msg = self.notifier.send("動畫瘋下載完成", summary_text)
+            if self.notifier.enabled:
+                _print(f"[dim]推播狀態：{msg}[/dim]" if ok else f"[yellow]推播未成功：{msg}[/yellow]")
 
     def action_manage_watchlist(self) -> None:
         while True:
@@ -355,40 +350,66 @@ class AnimeManagerApp:
                 _print(f"    [red]修復失敗：{msg}[/red]")
 
     def action_setup_cookie(self) -> None:
-        """透過剪貼簿直接寫入或開啟編輯器更新 cookie.txt，避開終端輸入字數上限。"""
-        _print("\n[bold]設定或更新巴哈姆特 VIP Cookie (cookie.txt)[/bold]")
-        _print(f"檔案位置：[cyan]{self.env.cookie_path}[/cyan]")
-        _print(
-            "[dim]取得方式：無痕視窗登入巴哈 VIP -> 動畫瘋首頁按 F12 -> Network -> 重新整理 -> "
-            "點第一個 ani.gamer.com.tw -> 複製 Request Headers 裡的 cookie 值（抓完直接關視窗，勿點登出）。[/dim]\n"
-        )
-        _print("  [cyan]1[/cyan]. 直接從「系統剪貼簿」讀取並寫入 cookie.txt（推薦，無字數限制且不顯示敏感內容）")
-        _print("  [cyan]2[/cyan]. 用文字編輯器開啟 cookie.txt 手動貼上並存檔")
-        _print("  [cyan]0[/cyan]. 返回主選單")
+        """VIP Cookie 管理選單：剪貼簿防呆寫入+刷新、純刷新重讀、Playwright 半自動抓取、開檔編輯。"""
+        while True:
+            _print("\n[bold]VIP Cookie 管理 (cookie.txt)[/bold]")
+            _print(f"檔案路徑：[cyan]{self.env.cookie_path}[/cyan]")
+            _print("  [cyan]1[/cyan]. 從剪貼簿讀取 -> 防呆驗證 -> 寫入 cookie.txt 並立即刷新驗證（推薦）")
+            _print("  [cyan]2[/cyan]. 純刷新重新讀取現有 cookie.txt 並驗證結果")
+            _print("  [cyan]3[/cyan]. 半自動腳本抓取（開啟獨立瀏覽器登入巴哈 -> 自動存檔並關閉，免 F12）")
+            _print("  [cyan]4[/cyan]. 用文字編輯器開啟 cookie.txt 手動修改")
+            _print("  [cyan]0[/cyan]. 返回主選單")
 
-        sub = _ask("請選擇更新方式", default="1")
-        if sub == "1":
-            ok, content = _read_clipboard(self.env.raw_os)
-            if not ok:
-                _print(f"[red]{content}[/red]")
-                return
-            cleaned = _sanitize_cookie(content)
-            if len(cleaned) < 20 or "=" not in cleaned:
-                _print("[red]剪貼簿內容看起來不像有效的 Cookie 字串（長度過短或不含 '='），已取消寫入。[/red]")
-                return
-            self.env.cookie_path.write_text(cleaned + "\n", encoding="utf-8")
-            self.refresh_env()
-            _print(f"[green]已成功從剪貼簿寫入 cookie.txt（共 {len(cleaned)} 字元）。[/green]")
-        elif sub == "2":
-            if _open_text_file(self.env.cookie_path, self.env.raw_os):
-                _print(f"[green]已開啟編輯器：{self.env.cookie_path}[/green]")
-                _print("請貼上完整 Cookie 並存檔後，按 Enter 重新偵測狀態。")
-                input()
+            sub = _ask("請選擇操作", default="1")
+
+            if sub == "1":
+                ok, content = read_clipboard(self.env.raw_os)
+                if not ok:
+                    _print(f"[red]{content}[/red]")
+                    continue
+                check = validate_and_sanitize_cookie(content)
+                if not check.valid:
+                    _print(f"[bold red]攔截！未修改現有 cookie.txt：[/bold red]{check.reason}")
+                    continue
+                write_cookie_file(self.env.cookie_path, check.cleaned_cookie)
                 self.refresh_env()
-                status = "[green]已偵測到有效內容[/green]" if self.env.has_cookie else "[yellow]檔案仍為空或過短[/yellow]"
-                _print(f"目前狀態：{status}")
+                _print("[green]已寫入 cookie.txt 並重新載入環境。[/green]")
+                self._print_cookie_result(check, run_online_check=True)
+
+            elif sub == "2":
+                self.refresh_env()
+                _print("[cyan]已重新讀取 cookie.txt：[/cyan]")
+                check = inspect_cookie_file(self.env.cookie_path)
+                self._print_cookie_result(check, run_online_check=True)
+
+            elif sub == "3":
+                _print("[cyan]正在啟動獨立無痕瀏覽器，請在彈出視窗登入巴哈姆特（登入完成後會自動擷取並關閉視窗）...[/cyan]")
+                ok, msg, check = capture_cookie_via_playwright(self.env.cookie_path)
+                if not ok:
+                    _print(f"[yellow]{msg}[/yellow]")
+                    continue
+                self.refresh_env()
+                _print(f"[green]{msg}[/green]")
+                if check:
+                    self._print_cookie_result(check, run_online_check=True)
+
+            elif sub == "4":
+                if open_cookie_in_editor(self.env.cookie_path, self.env.raw_os):
+                    _print(f"[green]已用編輯器開啟：{self.env.cookie_path}[/green]")
+                    _print("[dim]手動貼上並存檔後，請選「2」純刷新重新讀取並驗證結果。[/dim]")
+                else:
+                    _print(f"[yellow]請手動編輯：{self.env.cookie_path}[/yellow]")
+
             else:
-                _print(f"[yellow]無法自動開啟編輯器，請手動編輯：{self.env.cookie_path}[/yellow]")
+                break
+
+    def action_test_notification(self) -> None:
+        self.refresh_env()
+        ok, msg = self.notifier.send("aniGamerPlus 測試通知", "這是一則來自 aniGamerPlus 模組化管理工具的測試訊息。")
+        if ok:
+            _print(f"[green]測試推播成功：{msg}[/green]")
+        else:
+            _print(f"[yellow]{msg}[/yellow]")
 
     def run_interactive(self) -> None:
         while True:
@@ -398,8 +419,9 @@ class AnimeManagerApp:
             _print("  [cyan]2[/cyan]. 僅檢查更新狀態（不下載）")
             _print("  [cyan]3[/cyan]. 管理追番清單與畫質設定")
             _print("  [cyan]4[/cyan]. 檢查影片音軌 / 修復 QuickTime 無聲問題")
-            _print("  [cyan]5[/cyan]. 設定或更新 VIP cookie.txt")
+            _print("  [cyan]5[/cyan]. VIP Cookie 管理（剪貼簿防呆寫入 / 純刷新 / 腳本自動抓取）")
             _print("  [cyan]6[/cyan]. 開啟下載資料夾 (bangumi)")
+            _print("  [cyan]7[/cyan]. 測試手機推播通知")
             _print("  [cyan]0[/cyan]. 離開")
 
             choice = _ask("\n請選擇功能", default="1")
@@ -416,6 +438,8 @@ class AnimeManagerApp:
             elif choice == "6":
                 self.env.bangumi_dir.mkdir(parents=True, exist_ok=True)
                 _open_folder(self.env.bangumi_dir, self.env.raw_os)
+            elif choice == "7":
+                self.action_test_notification()
             elif choice == "0":
                 _print("[dim]已離開。[/dim]")
                 break

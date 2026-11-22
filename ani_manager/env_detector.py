@@ -69,7 +69,7 @@ def detect_environment(root_dir: Path | None = None, custom_bangumi_dir: str | N
 
     db_path = resolved_root / "aniGamer.db"
     cookie_path = resolved_root / "cookie.txt"
-    has_cookie = cookie_path.is_file() and cookie_path.stat().st_size > 10
+    has_cookie = cookie_path.is_file() and cookie_path.stat().st_size > 20
 
     return EnvironmentInfo(
         raw_os=raw_os,

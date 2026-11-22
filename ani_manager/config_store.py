@@ -29,7 +29,7 @@ class ManagerConfig:
     notification: dict[str, Any] = field(
         default_factory=lambda: {
             "enabled": False,
-            "provider": "none",  # 未來可擴充: "ntfy" | "discord" | "telegram"
+            "provider": "none",  # 支援: "ntfy" | "discord" | "telegram"
             "endpoint": "",
             "token": "",
             "chat_id": "",
