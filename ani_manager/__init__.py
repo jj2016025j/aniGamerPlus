@@ -1,3 +1,3 @@
 """aniGamerPlus 模組化增量下載管理工具包。"""
 
-__version__ = "1.3.1"
+__version__ = "1.4.0"

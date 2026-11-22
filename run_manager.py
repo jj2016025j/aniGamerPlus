@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-aniGamerPlus 模組化增量下載工具入口腳本 (v1.3)。
+aniGamerPlus 模組化增量下載工具入口腳本 (v1.4)。
 支援同目錄外掛模式與獨立私人倉庫模式（vendor/aniGamerPlus）。
 """
 
@@ -15,46 +15,16 @@ from ani_manager.env_detector import configure_console_encoding
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="aniGamerPlus 模組化增量更新管理工具 v1.3"
-    )
-    parser.add_argument(
-        "--update",
-        action="store_true",
-        help="非互動模式：檢查啟用中的追番清單並只下載缺漏/新集數",
-    )
-    parser.add_argument(
-        "--check",
-        action="store_true",
-        help="非互動模式：只檢查線上集數與本地差異，不下載",
-    )
-    parser.add_argument(
-        "--sn",
-        type=str,
-        default=None,
-        help="指定單一作品 SN 或動畫瘋網址，可搭配 --update / --check / --force",
-    )
-    parser.add_argument(
-        "--force",
-        action="store_true",
-        help="搭配 --sn，忽略所有去重紀錄直接強制下載該 SN 單集（適合測試 Cookie）",
-    )
-    parser.add_argument(
-        "--fix-audio",
-        action="store_true",
-        help="掃描 bangumi 目錄音軌狀態並修復不相容音軌",
-    )
-    parser.add_argument(
-        "--test-notify",
-        action="store_true",
-        help="對所有已啟用的手機推播管道發送測試訊息",
-    )
-    parser.add_argument(
-        "--root",
-        type=str,
-        default=None,
-        help="手動指定工作根目錄（預設為腳本所在目錄）",
-    )
+    parser = argparse.ArgumentParser(description="aniGamerPlus 模組化增量更新管理工具 v1.4")
+    parser.add_argument("--update", action="store_true", help="非互動模式：檢查所有啟用中追番並下載新集數")
+    parser.add_argument("--check", action="store_true", help="非互動模式：僅檢查線上集數與本地差異")
+    parser.add_argument("--notify", action="store_true", help="搭配 --check，檢查完成後自動將追番簡報推播到手機")
+    parser.add_argument("--sn", type=str, default=None, help="指定單一作品 SN 或動畫瘋網址")
+    parser.add_argument("--force", action="store_true", help="搭配 --sn，忽略去重強制下載該單集")
+    parser.add_argument("--fix-audio", action="store_true", help="掃描 bangumi 目錄並修復不相容音軌")
+    parser.add_argument("--test-notify", action="store_true", help="掃描目前追番並推播一份真實簡報到手機")
+    parser.add_argument("--no-startup-check", action="store_true", help="進入互動選單時略過上線快報掃描")
+    parser.add_argument("--root", type=str, default=None, help="手動指定工作根目錄")
     return parser.parse_args()
 
 
@@ -68,7 +38,7 @@ def main() -> None:
 
     if args.test_notify:
         app.show_banner()
-        app.action_test_notification()
+        app.action_send_digest_notification(force_rescan=True)
         return
 
     if args.fix_audio:
@@ -83,7 +53,7 @@ def main() -> None:
 
     if args.check:
         app.show_banner()
-        app.action_check_or_update(download=False, single_sn=sn)
+        app.action_check_or_update(download=False, single_sn=sn, push_check_notify=args.notify)
         return
 
     if args.update:
@@ -91,7 +61,7 @@ def main() -> None:
         app.action_check_or_update(download=True, single_sn=sn)
         return
 
-    app.run_interactive()
+    app.run_interactive(skip_startup_check=args.no_startup_check)
 
 
 if __name__ == "__main__":

@@ -38,11 +38,7 @@ def configure_console_encoding() -> None:
 
 
 def resolve_anigamer_location(root_dir: Path, custom_anigamer_dir: str = "") -> tuple[Path, Path | None]:
-    """
-    自動尋找 aniGamerPlus.py 位置，支援兩種架構：
-    1. 同目錄外掛模式（與 aniGamerPlus.py 放在一起）
-    2. 獨立私人倉庫模式（aniGamerPlus 放在 vendor/aniGamerPlus 或自訂路徑）
-    """
+    """自動尋找 aniGamerPlus.py 位置（支援同目錄外掛與獨立倉庫 vendor/aniGamerPlus）。"""
     candidates: list[Path] = []
     if custom_anigamer_dir.strip():
         p = Path(custom_anigamer_dir).expanduser()
@@ -88,7 +84,6 @@ def detect_environment(
     custom_bangumi_dir: str | None = None,
     custom_anigamer_dir: str = "",
 ) -> EnvironmentInfo:
-    """偵測作業系統、aniGamerPlus 核心檔、虛擬環境、Cookie 與 FFmpeg 狀態。"""
     resolved_root = (root_dir or Path.cwd()).resolve()
     raw_os = platform.system()
     os_map = {"Windows": "Windows", "Darwin": "macOS", "Linux": "Linux"}

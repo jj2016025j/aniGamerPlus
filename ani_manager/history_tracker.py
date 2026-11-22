@@ -32,6 +32,11 @@ class EpisodeDiffResult:
     missing_episodes: list[EpisodeInfo]
     upgradable_episodes: list[tuple[EpisodeInfo, int]]
 
+    @property
+    def total_local_count(self) -> int:
+        """本地實際已持有的集數（含已達標集數 + 既有低畫質可升級集數），避免誤顯示 0 集。"""
+        return len(self.already_downloaded) + len(self.upgradable_episodes)
+
 
 def normalize_title(text: str) -> str:
     """移除常見標點與空白，讓檔名與網頁標題比對更穩定。"""

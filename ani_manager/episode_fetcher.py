@@ -28,7 +28,7 @@ class EpisodeFetchError(RuntimeError):
     """抓取動畫瘋集數清單失敗時拋出。"""
 
 
-def _load_cookie_header(cookie_path: Path | None) -> str:
+def load_cookie_header(cookie_path: Path | None) -> str:
     if not cookie_path or not cookie_path.is_file():
         return ""
     raw = cookie_path.read_text(encoding="utf-8", errors="ignore").strip()
@@ -37,7 +37,8 @@ def _load_cookie_header(cookie_path: Path | None) -> str:
     return raw.splitlines()[0].strip() if raw else ""
 
 
-def _http_get_html(url: str, cookie_header: str = "", timeout: int = 15) -> str:
+def http_get_page(url: str, cookie_header: str = "", timeout: int = 15) -> tuple[str, str]:
+    """回傳 (final_url, html_text)，自動跟隨重導向（例如 animeRef.php -> animeVideo.php）。"""
     headers = {
         "User-Agent": DEFAULT_UA,
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -50,17 +51,17 @@ def _http_get_html(url: str, cookie_header: str = "", timeout: int = 15) -> str:
     try:
         import requests  # type: ignore
 
-        resp = requests.get(url, headers=headers, timeout=timeout)
+        resp = requests.get(url, headers=headers, timeout=timeout, allow_redirects=True)
         if resp.status_code == 403:
-            raise EpisodeFetchError("連線被動畫瘋 / Cloudflare 擋下 (HTTP 403)，請改用「快速下載最新一集」模式或更新 cookie.txt。")
+            raise EpisodeFetchError("連線被動畫瘋 / Cloudflare 擋下 (HTTP 403)，請稍後再試或更新 cookie.txt。")
+        if resp.status_code == 404:
+            raise EpisodeFetchError("動畫瘋找不到此頁面 (HTTP 404)，請確認 SN 是否正確。")
         resp.raise_for_status()
         resp.encoding = resp.apparent_encoding or "utf-8"
-        return resp.text
+        return str(resp.url), resp.text
     except ImportError:
         pass
-    except EpisodeFetchError:
-        raise
-    except KeyboardInterrupt:
+    except (EpisodeFetchError, KeyboardInterrupt):
         raise
     except Exception as exc:
         raise EpisodeFetchError(f"抓取網頁失敗：{exc}") from exc
@@ -68,10 +69,12 @@ def _http_get_html(url: str, cookie_header: str = "", timeout: int = 15) -> str:
     req = urllib.request.Request(url, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.read().decode("utf-8", errors="replace")
+            return str(resp.geturl()), resp.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as exc:
         if exc.code == 403:
-            raise EpisodeFetchError("連線被動畫瘋 / Cloudflare 擋下 (HTTP 403)，請改用「快速下載最新一集」模式或更新 cookie.txt。") from exc
+            raise EpisodeFetchError("連線被動畫瘋 / Cloudflare 擋下 (HTTP 403)，請稍後再試或更新 cookie.txt。") from exc
+        if exc.code == 404:
+            raise EpisodeFetchError("動畫瘋找不到此頁面 (HTTP 404)，請確認 SN 是否正確。") from exc
         raise EpisodeFetchError(f"HTTP 錯誤 ({exc.code})：{exc.reason}") from exc
     except KeyboardInterrupt:
         raise
@@ -87,7 +90,7 @@ def parse_episodes_from_html(page_html: str, fallback_title: str = "") -> tuple[
         raw_title = html.unescape(title_match.group(1)).strip()
         cleaned = re.sub(r"\s*\[\d+(?:\.\d+)?\]\s*線上看.*$", "", raw_title).strip()
         cleaned = re.sub(r"\s*-\s*巴哈姆特動畫瘋.*$", "", cleaned).strip()
-        if cleaned:
+        if cleaned and cleaned != "巴哈姆特動畫瘋":
             title = cleaned
 
     season_match = re.search(
@@ -122,11 +125,9 @@ def parse_episodes_from_html(page_html: str, fallback_title: str = "") -> tuple[
 def fetch_anime_episodes(base_sn: str, cookie_path: Path | None = None, fallback_title: str = "") -> tuple[str, list[EpisodeInfo]]:
     """依任一集 SN 抓取整部作品目前上架的所有集數清單。"""
     url = ANIGAMER_VIDEO_URL.format(sn=str(base_sn).strip())
-    cookie_header = _load_cookie_header(cookie_path)
-    page_html = _http_get_html(url, cookie_header=cookie_header)
+    cookie_header = load_cookie_header(cookie_path)
+    _, page_html = http_get_page(url, cookie_header=cookie_header)
     title, episodes = parse_episodes_from_html(page_html, fallback_title=fallback_title)
     if not episodes:
-        raise EpisodeFetchError(
-            "頁面已讀取但未解析出任何集數 SN（可能是需要登入/年齡驗證，或網頁結構變動）。"
-        )
+        raise EpisodeFetchError("找不到此 SN 對應的動畫集數（SN 可能無效、已下架，或需登入驗證）。")
     return title, episodes

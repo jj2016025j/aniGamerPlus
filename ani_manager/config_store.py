@@ -1,4 +1,4 @@
-"""設定檔與追番清單管理模組（manager_config.json）。"""
+"""設定檔、追番清單管理與嚴格輸入驗證模組（manager_config.json）。"""
 
 from __future__ import annotations
 
@@ -7,6 +7,18 @@ import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
+
+ALLOWED_RESOLUTIONS = ("1080", "720", "540", "360")
+WEEKDAY_MAP = {
+    "1": "週一",
+    "2": "週二",
+    "3": "週三",
+    "4": "週四",
+    "5": "週五",
+    "6": "週六",
+    "7": "週日",
+}
+HHMM_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
 
 
 @dataclass
@@ -20,37 +32,25 @@ class AnimeWatchItem:
 
 
 def default_notifications() -> dict[str, Any]:
-    """支援四種推播管道獨立開關（ntfy / Discord / Telegram / LINE），可單選也可同時啟用多個。"""
+    """支援四種推播管道獨立開關（ntfy / Discord / Telegram / LINE）。"""
     return {
-        "ntfy": {
-            "enabled": False,
-            "endpoint": "",
-        },
-        "discord": {
-            "enabled": False,
-            "webhook_url": "",
-        },
-        "telegram": {
-            "enabled": False,
-            "token": "",
-            "chat_id": "",
-        },
-        "line": {
-            "enabled": False,
-            "channel_access_token": "",
-            "user_id": "",
-        },
+        "ntfy": {"enabled": False, "endpoint": ""},
+        "discord": {"enabled": False, "webhook_url": ""},
+        "telegram": {"enabled": False, "token": "", "chat_id": ""},
+        "line": {"enabled": False, "channel_access_token": "", "user_id": ""},
     }
 
 
 @dataclass
 class ManagerConfig:
-    anigamer_dir: str = ""  # 留空自動偵測（同目錄或 vendor/aniGamerPlus）
+    anigamer_dir: str = ""
     bangumi_dir: str = "bangumi"
     default_resolution: str = "1080"
     cooldown_seconds: int = 10
-    dedup_mode: str = "file_only"  # "file_only" (刪檔就重抓) | "file_and_history" (檔案+歷史+DB)
+    dedup_mode: str = "file_only"  # "file_only" | "file_and_history"
     upgrade_lower_resolution: bool = False
+    check_on_startup: bool = True  # 啟動程式上線時自動快速檢查追番新集數簡報
+    clear_screen_on_menu: bool = True  # 切換畫面時清空視窗保持版面清爽
     auto_check_audio: bool = True
     auto_fix_audio: bool = False
     notifications: dict[str, Any] = field(default_factory=default_notifications)
@@ -64,7 +64,7 @@ def default_config() -> ManagerConfig:
                 name="學生會也有洞！",
                 sn="51813",
                 resolution="1080",
-                schedule_note="每週日 01:00 更新（動畫瘋）",
+                schedule_note="每週日 01:00",
                 total_episodes=12,
                 enabled=True,
             )
@@ -73,18 +73,49 @@ def default_config() -> ManagerConfig:
 
 
 def extract_sn_from_input(raw_input: str) -> str | None:
-    """同時支援輸入純 SN 數字或完整動畫瘋網址（https://ani.gamer.com.tw/animeVideo.php?sn=51813）。"""
+    """從純 SN 或動畫瘋網址抽出 SN；若明顯太短（少於 4 碼）回傳 None 防止誤輸入。"""
     text = raw_input.strip()
     if text.isdigit():
-        return text
-    match = re.search(r"[?&]sn=(\d+)", text)
+        return text if len(text) >= 4 else None
+    match = re.search(r"[?&]sn=(\d{4,})", text)
     if match:
         return match.group(1)
     return None
 
 
+def validate_resolution(raw: str) -> str | None:
+    cleaned = raw.strip().upper().replace("P", "")
+    return cleaned if cleaned in ALLOWED_RESOLUTIONS else None
+
+
+def validate_total_episodes(raw: str) -> tuple[bool, int | None, str]:
+    text = raw.strip()
+    if not text or text == "-":
+        return True, None, ""
+    if not text.isdigit():
+        return False, None, "總集數必須是正整數（或直接按 Enter 留空）。"
+    num = int(text)
+    if num < 1 or num > 2000:
+        return False, None, "總集數必須介於 1 ~ 2000 之間。"
+    return True, num, ""
+
+
+def validate_hhmm(raw: str) -> str | None:
+    """將 1:00 / 01:00 / 0100 正規化為 HH:MM，無效時間回傳 None。"""
+    text = raw.strip().replace("：", ":")
+    if re.fullmatch(r"\d{4}", text):
+        text = f"{text[:2]}:{text[2:]}"
+    elif re.fullmatch(r"\d:\d{2}", text):
+        text = "0" + text
+    return text if HHMM_RE.match(text) else None
+
+
+def parse_multi_targets(raw: str) -> list[str]:
+    """支援單選（如 3）或多選（如 5,6 或 5 6）。"""
+    return [tok.strip() for tok in re.split(r"[,，\s]+", raw.strip()) if tok.strip()]
+
+
 def _migrate_notifications(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
-    """相容舊版設定檔，平滑補齊新推播管道欄位（如 line）且完整保留既有憑證。"""
     base = default_notifications()
     needs_save = False
 
@@ -134,7 +165,7 @@ class ConfigStore:
             AnimeWatchItem(
                 name=item.get("name", f"SN-{item.get('sn', '')}"),
                 sn=str(item.get("sn", "")).strip(),
-                resolution=str(item.get("resolution", raw.get("default_resolution", "1080"))),
+                resolution=validate_resolution(str(item.get("resolution", raw.get("default_resolution", "1080")))) or "1080",
                 schedule_note=item.get("schedule_note", ""),
                 total_episodes=item.get("total_episodes"),
                 enabled=bool(item.get("enabled", True)),
@@ -148,14 +179,18 @@ class ConfigStore:
             dedup_mode = "file_only"
 
         notifications, needs_save = _migrate_notifications(raw)
+        if "check_on_startup" not in raw or "clear_screen_on_menu" not in raw:
+            needs_save = True
 
         cfg = ManagerConfig(
             anigamer_dir=str(raw.get("anigamer_dir", "")),
             bangumi_dir=raw.get("bangumi_dir", "bangumi"),
-            default_resolution=str(raw.get("default_resolution", "1080")),
+            default_resolution=validate_resolution(str(raw.get("default_resolution", "1080"))) or "1080",
             cooldown_seconds=int(raw.get("cooldown_seconds", 10)),
             dedup_mode=dedup_mode,
             upgrade_lower_resolution=bool(raw.get("upgrade_lower_resolution", False)),
+            check_on_startup=bool(raw.get("check_on_startup", True)),
+            clear_screen_on_menu=bool(raw.get("clear_screen_on_menu", True)),
             auto_check_audio=bool(raw.get("auto_check_audio", True)),
             auto_fix_audio=bool(raw.get("auto_fix_audio", False)),
             notifications=notifications,
@@ -170,30 +205,48 @@ class ConfigStore:
         with self.config_path.open("w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False, indent=2)
 
-    def add_or_update_anime(self, config: ManagerConfig, item: AnimeWatchItem) -> ManagerConfig:
+    def add_or_update_anime(self, config: ManagerConfig, item: AnimeWatchItem) -> tuple[ManagerConfig, bool]:
+        """回傳 (config, is_new)。"""
         for idx, existing in enumerate(config.watchlist):
             if existing.sn == item.sn or existing.name == item.name:
                 config.watchlist[idx] = item
                 self.save(config)
-                return config
+                return config, False
         config.watchlist.append(item)
         self.save(config)
-        return config
+        return config, True
 
-    def remove_anime(self, config: ManagerConfig, sn_or_index: str) -> bool:
-        target = sn_or_index.strip()
+    def find_by_target(self, config: ManagerConfig, target: str) -> AnimeWatchItem | None:
+        t = target.strip()
         for idx, item in enumerate(config.watchlist):
-            if item.sn == target or str(idx + 1) == target:
-                config.watchlist.pop(idx)
-                self.save(config)
-                return True
-        return False
-
-    def toggle_anime(self, config: ManagerConfig, sn_or_index: str) -> AnimeWatchItem | None:
-        target = sn_or_index.strip()
-        for idx, item in enumerate(config.watchlist):
-            if item.sn == target or str(idx + 1) == target:
-                item.enabled = not item.enabled
-                self.save(config)
+            if item.sn == t or str(idx + 1) == t:
                 return item
         return None
+
+    def remove_many(self, config: ManagerConfig, targets: list[str]) -> list[AnimeWatchItem]:
+        """支援一次刪除多筆（依編號或 SN），先定位再倒序刪除避免索引錯位。"""
+        indices: set[int] = set()
+        for t in targets:
+            for idx, item in enumerate(config.watchlist):
+                if item.sn == t or str(idx + 1) == t:
+                    indices.add(idx)
+        removed: list[AnimeWatchItem] = []
+        for idx in sorted(indices, reverse=True):
+            removed.append(config.watchlist.pop(idx))
+        if removed:
+            self.save(config)
+        return list(reversed(removed))
+
+    def toggle_many(self, config: ManagerConfig, targets: list[str]) -> list[AnimeWatchItem]:
+        """支援一次切換多筆啟用／暫停狀態。"""
+        toggled: list[AnimeWatchItem] = []
+        seen: set[int] = set()
+        for t in targets:
+            for idx, item in enumerate(config.watchlist):
+                if idx not in seen and (item.sn == t or str(idx + 1) == t):
+                    seen.add(idx)
+                    item.enabled = not item.enabled
+                    toggled.append(item)
+        if toggled:
+            self.save(config)
+        return toggled
