@@ -1,4 +1,4 @@
-"""動畫瘋線上集數與 SN 解析模組。"""
+"""動畫瘋線上集數、上架時間解析與集數區間壓縮模組。"""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import re
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 ANIGAMER_VIDEO_URL = "https://ani.gamer.com.tw/animeVideo.php?sn={sn}"
@@ -28,6 +29,58 @@ class EpisodeFetchError(RuntimeError):
     """抓取動畫瘋集數清單失敗時拋出。"""
 
 
+def format_episode_ranges(episodes: list[EpisodeInfo], compact: bool = False) -> str:
+    """
+    將連續集數壓縮成易讀區間，避免一集一集條列：
+    - [1,2,3,4,5,6,7] -> "第 1~7 集" (compact: "#1~7")
+    - [1,2,3, 5, 7,8] -> "第 1~3、5、7~8 集" (compact: "#1~3, 5, 7~8")
+    - [8] -> "第 8 集" (compact: "#8")
+    """
+    if not episodes:
+        return "無"
+
+    nums: list[int] = []
+    specials: list[str] = []
+    seen_num: set[int] = set()
+    seen_sp: set[str] = set()
+
+    for ep in episodes:
+        lbl = str(ep.episode_label).strip()
+        if lbl.isdigit():
+            n = int(lbl)
+            if n not in seen_num:
+                seen_num.add(n)
+                nums.append(n)
+        else:
+            if lbl and lbl not in seen_sp:
+                seen_sp.add(lbl)
+                specials.append(lbl)
+
+    nums.sort()
+    range_parts: list[str] = []
+    if nums:
+        start = prev = nums[0]
+        for n in nums[1:]:
+            if n == prev + 1:
+                prev = n
+            else:
+                range_parts.append(f"{start}~{prev}" if prev > start else f"{start}")
+                start = prev = n
+        range_parts.append(f"{start}~{prev}" if prev > start else f"{start}")
+
+    if compact:
+        all_parts = ([f"#{range_parts[0]}"] + range_parts[1:] if range_parts else []) + specials
+        return ", ".join(all_parts)
+
+    sep = "、"
+    chunks: list[str] = []
+    if range_parts:
+        chunks.append(f"第 {sep.join(range_parts)} 集")
+    if specials:
+        chunks.extend(specials)
+    return sep.join(chunks)
+
+
 def load_cookie_header(cookie_path: Path | None) -> str:
     if not cookie_path or not cookie_path.is_file():
         return ""
@@ -38,7 +91,7 @@ def load_cookie_header(cookie_path: Path | None) -> str:
 
 
 def http_get_page(url: str, cookie_header: str = "", timeout: int = 15) -> tuple[str, str]:
-    """回傳 (final_url, html_text)，自動跟隨重導向（例如 animeRef.php -> animeVideo.php）。"""
+    """回傳 (final_url, html_text)，自動跟隨重導向。"""
     headers = {
         "User-Agent": DEFAULT_UA,
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -80,6 +133,20 @@ def http_get_page(url: str, cookie_header: str = "", timeout: int = 15) -> tuple
         raise
     except Exception as exc:
         raise EpisodeFetchError(f"網路請求失敗：{exc}") from exc
+
+
+def parse_upload_datetime_from_html(page_html: str) -> datetime | None:
+    """從動畫瘋播放頁 HTML 解析該集的「上架時間：YYYY/MM/DD HH:MM」。"""
+    m = re.search(r"上架時間[：:\s]*(\d{4})[/-](\d{1,2})[/-](\d{1,2})(?:\s+(\d{1,2}):(\d{2}))?", page_html)
+    if not m:
+        return None
+    yr, mo, dy = int(m.group(1)), int(m.group(2)), int(m.group(3))
+    hr = int(m.group(4)) if m.group(4) else 0
+    mn = int(m.group(5)) if m.group(5) else 0
+    try:
+        return datetime(yr, mo, dy, hr, mn)
+    except ValueError:
+        return None
 
 
 def parse_episodes_from_html(page_html: str, fallback_title: str = "") -> tuple[str, list[EpisodeInfo]]:
@@ -131,3 +198,14 @@ def fetch_anime_episodes(base_sn: str, cookie_path: Path | None = None, fallback
     if not episodes:
         raise EpisodeFetchError("找不到此 SN 對應的動畫集數（SN 可能無效、已下架，或需登入驗證）。")
     return title, episodes
+
+
+def fetch_episode_upload_time(sn: str, cookie_path: Path | None = None) -> datetime | None:
+    """抓取指定單集播放頁的上架時間（精準取得每週更新星期＋時間，並可判斷是否已完結）。"""
+    try:
+        url = ANIGAMER_VIDEO_URL.format(sn=str(sn).strip())
+        cookie_header = load_cookie_header(cookie_path)
+        _, page_html = http_get_page(url, cookie_header=cookie_header, timeout=12)
+        return parse_upload_datetime_from_html(page_html)
+    except Exception:
+        return None

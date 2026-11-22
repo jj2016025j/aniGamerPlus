@@ -1,4 +1,4 @@
-# aniGamerPlus 模組化增量下載管理工具 (v1.4)
+# aniGamerPlus 模組化增量下載管理工具 (v1.4.1)
 
 本工具為 `miyouzi/aniGamerPlus` 的獨立模組化管理層。**不修改原本的 `aniGamerPlus.py` 與 `README.md`**，同時支援「同目錄外掛」與「獨立私人倉庫」兩種架構。
 
@@ -55,3 +55,12 @@ aniGamerPlus/ (或獨立私人倉庫)
 | 一鍵下載所有啟用中作品的新集數 | `.venv/bin/python run_manager.py --update` |
 | 僅檢查更新並直接推播簡報到手機 | `.venv/bin/python run_manager.py --check --notify` |
 | 強制單集測試（忽略紀錄） | `.venv/bin/python run_manager.py --sn 51813 --force` |
+
+---
+
+## 4. v1.4.1 修復與顯示優化
+
+* 改由動畫瘋最新一集播放頁的「上架時間」直接推算每週更新星期／時段與是否已完結（超過 21 天未更新自動標記已完結並同步總集數）。
+* 追番清單新增 `線上/總` 欄位並持久化目前線上上架集數，自動修正異常小於線上集數的舊總集數。
+* Bangumi 查詢補上繁轉簡與新版 v0 POST API，提升繁體輕小說長片名命中率。
+* 連續集數自動壓縮為區間（如 `第 1~7 集`、`#1~7`），檢查結果改採總覽表格＋縱向 SN 明細表呈現。

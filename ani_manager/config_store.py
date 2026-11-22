@@ -28,6 +28,8 @@ class AnimeWatchItem:
     resolution: str = "1080"
     schedule_note: str = ""
     total_episodes: int | None = None
+    online_episodes: int | None = None
+    status: str = ""  # "連載中" | "已完結" | ""
     enabled: bool = True
 
 
@@ -49,8 +51,8 @@ class ManagerConfig:
     cooldown_seconds: int = 10
     dedup_mode: str = "file_only"  # "file_only" | "file_and_history"
     upgrade_lower_resolution: bool = False
-    check_on_startup: bool = True  # 啟動程式上線時自動快速檢查追番新集數簡報
-    clear_screen_on_menu: bool = True  # 切換畫面時清空視窗保持版面清爽
+    check_on_startup: bool = True
+    clear_screen_on_menu: bool = True
     auto_check_audio: bool = True
     auto_fix_audio: bool = False
     notifications: dict[str, Any] = field(default_factory=default_notifications)
@@ -66,6 +68,8 @@ def default_config() -> ManagerConfig:
                 resolution="1080",
                 schedule_note="每週日 01:00",
                 total_episodes=12,
+                online_episodes=None,
+                status="連載中",
                 enabled=True,
             )
         ]
@@ -161,25 +165,38 @@ class ConfigStore:
         with self.config_path.open("r", encoding="utf-8") as f:
             raw = json.load(f)
 
-        watchlist = [
-            AnimeWatchItem(
-                name=item.get("name", f"SN-{item.get('sn', '')}"),
-                sn=str(item.get("sn", "")).strip(),
-                resolution=validate_resolution(str(item.get("resolution", raw.get("default_resolution", "1080")))) or "1080",
-                schedule_note=item.get("schedule_note", ""),
-                total_episodes=item.get("total_episodes"),
-                enabled=bool(item.get("enabled", True)),
+        needs_save = False
+        watchlist: list[AnimeWatchItem] = []
+        for item in raw.get("watchlist", []):
+            if not item.get("sn"):
+                continue
+            if "online_episodes" not in item or "status" not in item:
+                needs_save = True
+            sched = str(item.get("schedule_note", "") or "")
+            status = str(item.get("status", "") or "")
+            if not status and "已完結" in sched:
+                status = "已完結"
+            elif not status and sched.startswith("每週"):
+                status = "連載中"
+            watchlist.append(
+                AnimeWatchItem(
+                    name=item.get("name", f"SN-{item.get('sn', '')}"),
+                    sn=str(item.get("sn", "")).strip(),
+                    resolution=validate_resolution(str(item.get("resolution", raw.get("default_resolution", "1080")))) or "1080",
+                    schedule_note=sched,
+                    total_episodes=item.get("total_episodes"),
+                    online_episodes=item.get("online_episodes"),
+                    status=status,
+                    enabled=bool(item.get("enabled", True)),
+                )
             )
-            for item in raw.get("watchlist", [])
-            if item.get("sn")
-        ]
 
         dedup_mode = str(raw.get("dedup_mode", "file_only"))
         if dedup_mode not in ("file_only", "file_and_history"):
             dedup_mode = "file_only"
 
-        notifications, needs_save = _migrate_notifications(raw)
-        if "check_on_startup" not in raw or "clear_screen_on_menu" not in raw:
+        notifications, notif_save = _migrate_notifications(raw)
+        if notif_save or "check_on_startup" not in raw or "clear_screen_on_menu" not in raw:
             needs_save = True
 
         cfg = ManagerConfig(
@@ -206,7 +223,6 @@ class ConfigStore:
             json.dump(payload, f, ensure_ascii=False, indent=2)
 
     def add_or_update_anime(self, config: ManagerConfig, item: AnimeWatchItem) -> tuple[ManagerConfig, bool]:
-        """回傳 (config, is_new)。"""
         for idx, existing in enumerate(config.watchlist):
             if existing.sn == item.sn or existing.name == item.name:
                 config.watchlist[idx] = item
@@ -224,7 +240,6 @@ class ConfigStore:
         return None
 
     def remove_many(self, config: ManagerConfig, targets: list[str]) -> list[AnimeWatchItem]:
-        """支援一次刪除多筆（依編號或 SN），先定位再倒序刪除避免索引錯位。"""
         indices: set[int] = set()
         for t in targets:
             for idx, item in enumerate(config.watchlist):
@@ -238,7 +253,6 @@ class ConfigStore:
         return list(reversed(removed))
 
     def toggle_many(self, config: ManagerConfig, targets: list[str]) -> list[AnimeWatchItem]:
-        """支援一次切換多筆啟用／暫停狀態。"""
         toggled: list[AnimeWatchItem] = []
         seen: set[int] = set()
         for t in targets:
