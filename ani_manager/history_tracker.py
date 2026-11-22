@@ -1,4 +1,4 @@
-"""去重與增量過濾模組（支援「依實體檔案」與「檔案+歷史+DB」兩種模式）。"""
+"""去重、增量過濾與下載後實際畫質查驗模組。"""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from .audio_tools import probe_video_height
 from .episode_fetcher import EpisodeInfo
 
 FILENAME_PATTERN = re.compile(
@@ -55,7 +56,7 @@ def parse_resolution_int(res_text: str | int | None) -> int:
 
 
 class HistoryTracker:
-    """支援 file_only（刪影片就自動重抓）與 file_and_history（外接硬碟歸檔防重抓）。"""
+    """支援 file_only（刪影片就自動重抓）與 file_and_history（歸檔防重抓），並支援後置實際畫質核對。"""
 
     def __init__(self, history_path: Path, db_path: Path, bangumi_dir: Path) -> None:
         self.history_path = history_path
@@ -90,18 +91,6 @@ class HistoryTracker:
             "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
         self.save()
-
-    def clear_history_by_sns(self, sns: list[str]) -> int:
-        """清除指定 SN 的本地 JSON 紀錄（測試重抓用）。"""
-        removed = 0
-        store = self._data.get("downloaded_sns", {})
-        for sn in sns:
-            if str(sn) in store:
-                del store[str(sn)]
-                removed += 1
-        if removed:
-            self.save()
-        return removed
 
     def read_anigamer_db_sns(self) -> dict[str, int]:
         """安全唯讀 aniGamerPlus 原生 aniGamer.db。"""
@@ -174,6 +163,37 @@ class HistoryTracker:
                 )
         return records
 
+    def find_highest_local_resolution(self, episode: EpisodeInfo, anime_name_hint: str = "") -> tuple[int, str]:
+        """
+        【後置檢查核心】查詢某集在 bangumi/ 內實際存在的最大解析度（先看檔名標籤，並以 ffprobe 核對實際高度）。
+        回傳 (實際解析度高度, 檔案路徑)。
+        """
+        candidate_titles = {
+            normalize_title(episode.anime_title),
+            normalize_title(anime_name_hint),
+        }
+        ep_norm = normalize_episode_label(episode.episode_label)
+
+        best_res = 0
+        best_path = ""
+        for rec in self.scan_local_files():
+            if normalize_episode_label(rec.episode_label) != ep_norm:
+                continue
+            if normalize_title(rec.title) not in candidate_titles:
+                continue
+            actual_res = rec.resolution
+            if actual_res == 0:
+                actual_res = probe_video_height(Path(rec.file_path))
+            else:
+                probed = probe_video_height(Path(rec.file_path))
+                if probed > 0:
+                    actual_res = probed
+            if actual_res > best_res:
+                best_res = actual_res
+                best_path = rec.file_path
+
+        return best_res, best_path
+
     def compute_diff(
         self,
         online_episodes: list[EpisodeInfo],
@@ -182,11 +202,7 @@ class HistoryTracker:
         anime_name_hint: str = "",
         dedup_mode: str = "file_only",
     ) -> EpisodeDiffResult:
-        """
-        比對線上集數與本地狀態：
-        - dedup_mode == "file_only"：只以 bangumi/ 實體影片是否存在為準（刪掉檔案就會自動重抓）。
-        - dedup_mode == "file_and_history"：三層比對（實體檔 + download_history.json + aniGamer.db）。
-        """
+        """比對線上集數與本地狀態。"""
         target_res = parse_resolution_int(target_resolution)
         json_sns: dict = self._data.get("downloaded_sns", {}) if dedup_mode == "file_and_history" else {}
         db_sns = self.read_anigamer_db_sns() if dedup_mode == "file_and_history" else {}

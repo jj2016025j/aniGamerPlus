@@ -42,9 +42,9 @@ def default_notifications() -> dict[str, Any]:
 class ManagerConfig:
     anigamer_dir: str = ""  # 留空自動偵測（同目錄或 vendor/aniGamerPlus）
     bangumi_dir: str = "bangumi"
-    default_resolution: str = "1080"  # 預設優先嘗試 1080P，非 VIP 時 aniGamerPlus 自動降級 720P
+    default_resolution: str = "1080"
     cooldown_seconds: int = 10
-    dedup_mode: str = "file_only"  # "file_only" (刪檔就重抓) | "file_and_history" (比對檔案+歷史+DB)
+    dedup_mode: str = "file_only"  # "file_only" (刪檔就重抓) | "file_and_history" (檔案+歷史+DB)
     upgrade_lower_resolution: bool = False
     auto_check_audio: bool = True
     auto_fix_audio: bool = False
@@ -138,7 +138,7 @@ class ConfigStore:
         if dedup_mode not in ("file_only", "file_and_history"):
             dedup_mode = "file_only"
 
-        cfg = ManagerConfig(
+        return ManagerConfig(
             anigamer_dir=str(raw.get("anigamer_dir", "")),
             bangumi_dir=raw.get("bangumi_dir", "bangumi"),
             default_resolution=str(raw.get("default_resolution", "1080")),
@@ -150,7 +150,6 @@ class ConfigStore:
             notifications=_migrate_notifications(raw),
             watchlist=watchlist,
         )
-        return cfg
 
     def save(self, config: ManagerConfig) -> None:
         payload = asdict(config)

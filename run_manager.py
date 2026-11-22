@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """
-aniGamerPlus 模組化增量下載工具入口腳本 (v1.2)。
-支援兩種架構：
-1. 直接放在 aniGamerPlus 專案根目錄
-2. 放在獨立私人倉庫中，把原作者專案 clone 到 vendor/aniGamerPlus（或在 manager_config.json 指定 anigamer_dir）
+aniGamerPlus 模組化增量下載工具入口腳本 (v1.3)。
+支援同目錄外掛模式與獨立私人倉庫模式（vendor/aniGamerPlus）。
 """
 
 from __future__ import annotations
@@ -18,7 +16,7 @@ from ani_manager.env_detector import configure_console_encoding
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="aniGamerPlus 模組化增量更新管理工具 v1.2"
+        description="aniGamerPlus 模組化增量更新管理工具 v1.3"
     )
     parser.add_argument(
         "--update",

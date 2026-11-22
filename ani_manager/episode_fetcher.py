@@ -60,6 +60,8 @@ def _http_get_html(url: str, cookie_header: str = "", timeout: int = 15) -> str:
         pass
     except EpisodeFetchError:
         raise
+    except KeyboardInterrupt:
+        raise
     except Exception as exc:
         raise EpisodeFetchError(f"抓取網頁失敗：{exc}") from exc
 
@@ -71,6 +73,8 @@ def _http_get_html(url: str, cookie_header: str = "", timeout: int = 15) -> str:
         if exc.code == 403:
             raise EpisodeFetchError("連線被動畫瘋 / Cloudflare 擋下 (HTTP 403)，請改用「快速下載最新一集」模式或更新 cookie.txt。") from exc
         raise EpisodeFetchError(f"HTTP 錯誤 ({exc.code})：{exc.reason}") from exc
+    except KeyboardInterrupt:
+        raise
     except Exception as exc:
         raise EpisodeFetchError(f"網路請求失敗：{exc}") from exc
 

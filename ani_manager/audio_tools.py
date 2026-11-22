@@ -1,4 +1,4 @@
-"""影片音軌檢測與 QuickTime 相容性修復模組（ffprobe / ffmpeg）。"""
+"""影片音軌檢測、解析度探測與 QuickTime 相容性修復模組（ffprobe / ffmpeg）。"""
 
 from __future__ import annotations
 
@@ -20,6 +20,32 @@ class AudioInspection:
     channels: int
     quicktime_friendly: bool
     error: str = ""
+
+
+def probe_video_height(file_path: Path) -> int:
+    """使用 ffprobe 取得影片實際垂直解析度高度（例如 1080 / 720），失敗回傳 0。"""
+    if not shutil.which("ffprobe") or not file_path.is_file():
+        return 0
+    cmd = [
+        "ffprobe",
+        "-v",
+        "quiet",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=height",
+        "-of",
+        "csv=p=0",
+        str(file_path),
+    ]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=8)
+        val = (proc.stdout or "").strip().splitlines()
+        if val and val[0].strip().isdigit():
+            return int(val[0].strip())
+    except Exception:
+        pass
+    return 0
 
 
 def inspect_audio(file_path: Path) -> AudioInspection:
@@ -108,11 +134,23 @@ def remux_audio_for_quicktime(file_path: Path, replace_original: bool = True) ->
         "+faststart",
         str(temp_output),
     ]
-    proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace")
+    try:
+        _, stderr = proc.communicate()
+    except KeyboardInterrupt:
+        proc.terminate()
+        try:
+            proc.wait(timeout=3)
+        except Exception:
+            proc.kill()
+        if temp_output.exists():
+            temp_output.unlink(missing_ok=True)
+        raise
+
     if proc.returncode != 0 or not temp_output.is_file():
         if temp_output.exists():
             temp_output.unlink(missing_ok=True)
-        return False, proc.stderr.strip() or "ffmpeg 轉檔失敗"
+        return False, (stderr or "").strip() or "ffmpeg 轉檔失敗"
 
     if replace_original:
         target = file_path.with_suffix(".mp4")
