@@ -127,3 +127,13 @@ temp/
 cookie2.txt
 */*.iml
 **/.DS_Store
+
+# 個人憑證與執行期紀錄（嚴禁上傳）
+cookie.txt
+download_history.json
+manager_config.json
+aniGamer.db
+bangumi/
+.venv/
+__pycache__/
+*.pyc
