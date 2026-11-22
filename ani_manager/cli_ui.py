@@ -229,7 +229,7 @@ class AnimeManagerApp:
             f"[bold]目前預設下載作品 ({len(enabled_items)} 部)：[/bold]\n{watch_lines}"
         )
         if HAS_RICH and console:
-            console.print(Panel(body, title="aniGamerPlus 模組化增量管理工具 v1.3", border_style="cyan"))
+            console.print(Panel(body, title="aniGamerPlus 模組化增量管理工具 v1.3.1", border_style="cyan"))
         else:
             print("=" * 72)
             _print(body)
@@ -685,7 +685,7 @@ class AnimeManagerApp:
 
     def action_test_notification(self) -> None:
         self.refresh_env()
-        results = self.notifier.send("aniGamerPlus 測試通知", "這是一則來自 aniGamerPlus 模組化管理工具 v1.3 的多管道測試訊息。")
+        results = self.notifier.send("aniGamerPlus 測試通知", "這是一則來自 aniGamerPlus 模組化管理工具 v1.3.1 的多管道測試訊息。")
         for _, ok, msg in results:
             if ok:
                 _print(f"[green]成功：{msg}[/green]")

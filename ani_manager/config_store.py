@@ -20,7 +20,7 @@ class AnimeWatchItem:
 
 
 def default_notifications() -> dict[str, Any]:
-    """支援三種推播管道獨立開關，可單選也可同時啟用多個。"""
+    """支援四種推播管道獨立開關（ntfy / Discord / Telegram / LINE），可單選也可同時啟用多個。"""
     return {
         "ntfy": {
             "enabled": False,
@@ -34,6 +34,11 @@ def default_notifications() -> dict[str, Any]:
             "enabled": False,
             "token": "",
             "chat_id": "",
+        },
+        "line": {
+            "enabled": False,
+            "channel_access_token": "",
+            "user_id": "",
         },
     }
 
@@ -78,18 +83,22 @@ def extract_sn_from_input(raw_input: str) -> str | None:
     return None
 
 
-def _migrate_notifications(raw: dict[str, Any]) -> dict[str, Any]:
-    """相容舊版單一 notification 欄位，平滑升級為多管道 notifications 結構。"""
+def _migrate_notifications(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    """相容舊版設定檔，平滑補齊新推播管道欄位（如 line）且完整保留既有憑證。"""
     base = default_notifications()
+    needs_save = False
 
     if isinstance(raw.get("notifications"), dict):
         src = raw["notifications"]
-        for key in ("ntfy", "discord", "telegram"):
+        for key in ("ntfy", "discord", "telegram", "line"):
             if isinstance(src.get(key), dict):
                 base[key].update(src[key])
-        return base
+            else:
+                needs_save = True
+        return base, needs_save
 
     legacy = raw.get("notification")
+    needs_save = True
     if isinstance(legacy, dict) and legacy.get("enabled"):
         provider = str(legacy.get("provider", "none")).lower()
         if provider == "ntfy":
@@ -103,7 +112,7 @@ def _migrate_notifications(raw: dict[str, Any]) -> dict[str, Any]:
             base["telegram"]["token"] = legacy.get("token", "")
             base["telegram"]["chat_id"] = legacy.get("chat_id", "")
 
-    return base
+    return base, needs_save
 
 
 class ConfigStore:
@@ -138,7 +147,9 @@ class ConfigStore:
         if dedup_mode not in ("file_only", "file_and_history"):
             dedup_mode = "file_only"
 
-        return ManagerConfig(
+        notifications, needs_save = _migrate_notifications(raw)
+
+        cfg = ManagerConfig(
             anigamer_dir=str(raw.get("anigamer_dir", "")),
             bangumi_dir=raw.get("bangumi_dir", "bangumi"),
             default_resolution=str(raw.get("default_resolution", "1080")),
@@ -147,9 +158,12 @@ class ConfigStore:
             upgrade_lower_resolution=bool(raw.get("upgrade_lower_resolution", False)),
             auto_check_audio=bool(raw.get("auto_check_audio", True)),
             auto_fix_audio=bool(raw.get("auto_fix_audio", False)),
-            notifications=_migrate_notifications(raw),
+            notifications=notifications,
             watchlist=watchlist,
         )
+        if needs_save:
+            self.save(cfg)
+        return cfg
 
     def save(self, config: ManagerConfig) -> None:
         payload = asdict(config)
