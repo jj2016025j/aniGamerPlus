@@ -1,4 +1,4 @@
-"""設定檔、追番清單管理與嚴格輸入驗證模組（manager_config.json）。"""
+"""系統偏好與推播金鑰設定模組（manager_config.json，支援範本初始化與自動剝離舊版 watchlist）。"""
 
 from __future__ import annotations
 
@@ -21,18 +21,6 @@ WEEKDAY_MAP = {
 HHMM_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
 
 
-@dataclass
-class AnimeWatchItem:
-    name: str
-    sn: str
-    resolution: str = "1080"
-    schedule_note: str = ""
-    total_episodes: int | None = None
-    online_episodes: int | None = None
-    status: str = ""  # "連載中" | "已完結" | ""
-    enabled: bool = True
-
-
 def default_notifications() -> dict[str, Any]:
     """支援四種推播管道獨立開關（ntfy / Discord / Telegram / LINE）。"""
     return {
@@ -47,6 +35,7 @@ def default_notifications() -> dict[str, Any]:
 class ManagerConfig:
     anigamer_dir: str = ""
     bangumi_dir: str = "bangumi"
+    watchlist_file: str = "watchlist.json"
     default_resolution: str = "1080"
     cooldown_seconds: int = 10
     dedup_mode: str = "file_only"  # "file_only" | "file_and_history"
@@ -56,24 +45,10 @@ class ManagerConfig:
     auto_check_audio: bool = True
     auto_fix_audio: bool = False
     notifications: dict[str, Any] = field(default_factory=default_notifications)
-    watchlist: list[AnimeWatchItem] = field(default_factory=list)
 
 
 def default_config() -> ManagerConfig:
-    return ManagerConfig(
-        watchlist=[
-            AnimeWatchItem(
-                name="學生會也有洞！",
-                sn="51813",
-                resolution="1080",
-                schedule_note="每週日 01:00",
-                total_episodes=12,
-                online_episodes=None,
-                status="連載中",
-                enabled=True,
-            )
-        ]
-    )
+    return ManagerConfig()
 
 
 def extract_sn_from_input(raw_input: str) -> str | None:
@@ -151,57 +126,67 @@ def _migrate_notifications(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
 
 
 class ConfigStore:
-    """讀寫 manager_config.json，不干擾 aniGamerPlus 原生 config.json。"""
+    """
+    讀寫純淨設定檔 manager_config.json（僅保存系統偏好與推播金鑰）。
+    - 首次啟動無 manager_config.json 時，優先由 manager_config-sample.json 初始化。
+    - 若偵測舊版 manager_config.json 仍夾帶 watchlist，會取出交由 WatchlistStore 遷移並清除舊欄位。
+    """
 
-    def __init__(self, config_path: Path) -> None:
+    def __init__(self, config_path: Path, sample_path: Path | None = None) -> None:
         self.config_path = config_path
+        self.sample_path = sample_path
 
-    def load(self) -> ManagerConfig:
+    def load_with_legacy_watchlist(self) -> tuple[ManagerConfig, list[dict[str, Any]] | None]:
         if not self.config_path.is_file():
+            if self.sample_path and self.sample_path.is_file():
+                try:
+                    with self.sample_path.open("r", encoding="utf-8") as f:
+                        raw = json.load(f)
+                    cfg = self._parse_raw(raw)[0]
+                    self.save(cfg)
+                    return cfg, None
+                except Exception:
+                    pass
             cfg = default_config()
             self.save(cfg)
-            return cfg
+            return cfg, None
 
         with self.config_path.open("r", encoding="utf-8") as f:
             raw = json.load(f)
 
-        needs_save = False
-        watchlist: list[AnimeWatchItem] = []
-        for item in raw.get("watchlist", []):
-            if not item.get("sn"):
-                continue
-            if "online_episodes" not in item or "status" not in item:
-                needs_save = True
-            sched = str(item.get("schedule_note", "") or "")
-            status = str(item.get("status", "") or "")
-            if not status and "已完結" in sched:
-                status = "已完結"
-            elif not status and sched.startswith("每週"):
-                status = "連載中"
-            watchlist.append(
-                AnimeWatchItem(
-                    name=item.get("name", f"SN-{item.get('sn', '')}"),
-                    sn=str(item.get("sn", "")).strip(),
-                    resolution=validate_resolution(str(item.get("resolution", raw.get("default_resolution", "1080")))) or "1080",
-                    schedule_note=sched,
-                    total_episodes=item.get("total_episodes"),
-                    online_episodes=item.get("online_episodes"),
-                    status=status,
-                    enabled=bool(item.get("enabled", True)),
-                )
-            )
+        cfg, needs_save = self._parse_raw(raw)
+        legacy_watchlist = raw.get("watchlist") if isinstance(raw.get("watchlist"), list) else None
+        if legacy_watchlist is not None:
+            needs_save = True
 
+        if needs_save:
+            self.save(cfg)
+        return cfg, legacy_watchlist
+
+    def load(self) -> ManagerConfig:
+        cfg, _ = self.load_with_legacy_watchlist()
+        return cfg
+
+    def _parse_raw(self, raw: dict[str, Any]) -> tuple[ManagerConfig, bool]:
+        needs_save = False
         dedup_mode = str(raw.get("dedup_mode", "file_only"))
         if dedup_mode not in ("file_only", "file_and_history"):
             dedup_mode = "file_only"
+            needs_save = True
 
         notifications, notif_save = _migrate_notifications(raw)
-        if notif_save or "check_on_startup" not in raw or "clear_screen_on_menu" not in raw:
+        if (
+            notif_save
+            or "check_on_startup" not in raw
+            or "clear_screen_on_menu" not in raw
+            or "watchlist_file" not in raw
+        ):
             needs_save = True
 
         cfg = ManagerConfig(
             anigamer_dir=str(raw.get("anigamer_dir", "")),
-            bangumi_dir=raw.get("bangumi_dir", "bangumi"),
+            bangumi_dir=str(raw.get("bangumi_dir", "bangumi")),
+            watchlist_file=str(raw.get("watchlist_file", "watchlist.json") or "watchlist.json"),
             default_resolution=validate_resolution(str(raw.get("default_resolution", "1080"))) or "1080",
             cooldown_seconds=int(raw.get("cooldown_seconds", 10)),
             dedup_mode=dedup_mode,
@@ -211,56 +196,11 @@ class ConfigStore:
             auto_check_audio=bool(raw.get("auto_check_audio", True)),
             auto_fix_audio=bool(raw.get("auto_fix_audio", False)),
             notifications=notifications,
-            watchlist=watchlist,
         )
-        if needs_save:
-            self.save(cfg)
-        return cfg
+        return cfg, needs_save
 
     def save(self, config: ManagerConfig) -> None:
         payload = asdict(config)
+        self.config_path.parent.mkdir(parents=True, exist_ok=True)
         with self.config_path.open("w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False, indent=2)
-
-    def add_or_update_anime(self, config: ManagerConfig, item: AnimeWatchItem) -> tuple[ManagerConfig, bool]:
-        for idx, existing in enumerate(config.watchlist):
-            if existing.sn == item.sn or existing.name == item.name:
-                config.watchlist[idx] = item
-                self.save(config)
-                return config, False
-        config.watchlist.append(item)
-        self.save(config)
-        return config, True
-
-    def find_by_target(self, config: ManagerConfig, target: str) -> AnimeWatchItem | None:
-        t = target.strip()
-        for idx, item in enumerate(config.watchlist):
-            if item.sn == t or str(idx + 1) == t:
-                return item
-        return None
-
-    def remove_many(self, config: ManagerConfig, targets: list[str]) -> list[AnimeWatchItem]:
-        indices: set[int] = set()
-        for t in targets:
-            for idx, item in enumerate(config.watchlist):
-                if item.sn == t or str(idx + 1) == t:
-                    indices.add(idx)
-        removed: list[AnimeWatchItem] = []
-        for idx in sorted(indices, reverse=True):
-            removed.append(config.watchlist.pop(idx))
-        if removed:
-            self.save(config)
-        return list(reversed(removed))
-
-    def toggle_many(self, config: ManagerConfig, targets: list[str]) -> list[AnimeWatchItem]:
-        toggled: list[AnimeWatchItem] = []
-        seen: set[int] = set()
-        for t in targets:
-            for idx, item in enumerate(config.watchlist):
-                if idx not in seen and (item.sn == t or str(idx + 1) == t):
-                    seen.add(idx)
-                    item.enabled = not item.enabled
-                    toggled.append(item)
-        if toggled:
-            self.save(config)
-        return toggled

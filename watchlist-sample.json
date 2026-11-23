@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "items": [
+    {
+      "name": "學生會也有洞！",
+      "sn": "51813",
+      "resolution": "1080",
+      "schedule_note": "每週日 01:00",
+      "total_episodes": 12,
+      "online_episodes": null,
+      "status": "連載中",
+      "enabled": true
+    }
+  ]
+}

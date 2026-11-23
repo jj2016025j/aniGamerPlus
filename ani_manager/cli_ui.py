@@ -1,4 +1,4 @@
-"""終端互動介面與命令列控制器 v1.4.2（表格化檢查與 SN 顯示、區間壓縮、精準補齊狀態與集數）。"""
+"""終端互動介面與命令列控制器 v1.5.0（表格化檢查與 SN 顯示、區間壓縮、精準補齊狀態與集數）。"""
 
 from __future__ import annotations
 
@@ -12,7 +12,6 @@ from .audio_tools import remux_audio_for_quicktime, scan_directory_audio
 from .config_store import (
     ALLOWED_RESOLUTIONS,
     WEEKDAY_MAP,
-    AnimeWatchItem,
     ConfigStore,
     ManagerConfig,
     extract_sn_from_input,
@@ -21,6 +20,7 @@ from .config_store import (
     validate_resolution,
     validate_total_episodes,
 )
+from .watchlist_store import AnimeWatchItem, WatchlistStore
 from .cookie_manager import (
     CookieValidationResult,
     capture_cookie_via_playwright,
@@ -160,10 +160,25 @@ def _format_status_schedule(item: AnimeWatchItem) -> str:
 class AnimeManagerApp:
     """串接各獨立模組的主控制器。"""
 
+    def _resolve_watchlist_path(self, cfg: ManagerConfig) -> Path:
+        p = Path(cfg.watchlist_file).expanduser()
+        return p if p.is_absolute() else (self.root_dir / p).resolve()
+
     def __init__(self, root_dir: Path | None = None) -> None:
         self.root_dir = (root_dir or Path.cwd()).resolve()
-        self.config_store = ConfigStore(self.root_dir / "manager_config.json")
-        self.config: ManagerConfig = self.config_store.load()
+        self.config_store = ConfigStore(
+            self.root_dir / "manager_config.json",
+            sample_path=self.root_dir / "manager_config-sample.json",
+        )
+        self.config, legacy_watchlist = self.config_store.load_with_legacy_watchlist()
+        self.watchlist_store = WatchlistStore(
+            self._resolve_watchlist_path(self.config),
+            sample_path=self.root_dir / "watchlist-sample.json",
+        )
+        self.watchlist, self.migrated_watchlist = self.watchlist_store.load(
+            default_resolution=self.config.default_resolution,
+            legacy_items=legacy_watchlist,
+        )
         self.env: EnvironmentInfo = detect_environment(
             self.root_dir,
             self.config.bangumi_dir,
@@ -179,7 +194,15 @@ class AnimeManagerApp:
         self.last_snapshots: list[AnimeScanSnapshot] = []
 
     def refresh_env(self) -> None:
-        self.config = self.config_store.load()
+        self.config, legacy_watchlist = self.config_store.load_with_legacy_watchlist()
+        self.watchlist_store = WatchlistStore(
+            self._resolve_watchlist_path(self.config),
+            sample_path=self.root_dir / "watchlist-sample.json",
+        )
+        self.watchlist, _ = self.watchlist_store.load(
+            default_resolution=self.config.default_resolution,
+            legacy_items=legacy_watchlist,
+        )
         self.env = detect_environment(
             self.root_dir,
             self.config.bangumi_dir,
@@ -239,7 +262,7 @@ class AnimeManagerApp:
                 _print("  [yellow]已略過線上檢查。[/yellow]")
 
     def _scan_watchlist_snapshots(self, items: list[AnimeWatchItem] | None = None, quiet: bool = False) -> list[AnimeScanSnapshot]:
-        targets = items if items is not None else [w for w in self.config.watchlist if w.enabled]
+        targets = items if items is not None else [w for w in self.watchlist if w.enabled]
         snapshots: list[AnimeScanSnapshot] = []
         changed_config = False
 
@@ -287,7 +310,7 @@ class AnimeManagerApp:
                 )
 
         if changed_config:
-            self.config_store.save(self.config)
+            self.watchlist_store.save(self.watchlist)
         if items is None:
             self.last_snapshots = snapshots
         return snapshots
@@ -316,11 +339,11 @@ class AnimeManagerApp:
                     f"《{snap.title}》已追平 {snap.diff.total_local_count}/{snap.online_count} 集（總進度 {ratio}{sched_str}）"
                 )
 
-        paused = [w.name for w in self.config.watchlist if not w.enabled]
+        paused = [w.name for w in self.watchlist if not w.enabled]
         return format_check_digest(new_updates, up_to_date, paused, errors)
 
     def _print_startup_briefing(self) -> None:
-        enabled_items = [w for w in self.config.watchlist if w.enabled]
+        enabled_items = [w for w in self.watchlist if w.enabled]
         if not enabled_items:
             return
         _print(f"[cyan]正在執行上線更新快報（共 {len(enabled_items)} 部啟用中作品，按 Ctrl+C 可略過）...[/cyan]")
@@ -346,8 +369,8 @@ class AnimeManagerApp:
         )
 
         snap_by_sn = {s.item.sn: s for s in self.last_snapshots}
-        enabled_items = [w for w in self.config.watchlist if w.enabled]
-        paused_count = len(self.config.watchlist) - len(enabled_items)
+        enabled_items = [w for w in self.watchlist if w.enabled]
+        paused_count = len(self.watchlist) - len(enabled_items)
 
         brief_lines: list[str] = []
         if enabled_items:
@@ -374,7 +397,7 @@ class AnimeManagerApp:
         body = f"{status_line}\n\n[bold]{header_title}：[/bold]\n" + "\n".join(brief_lines)
 
         if HAS_RICH and console:
-            console.print(Panel(body, title="aniGamerPlus 增量下載管理器 v1.4.2", border_style="cyan", padding=(0, 2)))
+            console.print(Panel(body, title="aniGamerPlus 增量下載管理器 v1.5.0", border_style="cyan", padding=(0, 2)))
         else:
             print("=" * 72)
             _print(body)
@@ -529,7 +552,7 @@ class AnimeManagerApp:
                 _print(f"[red]單集下載異常：{res.message}[/red]")
             return
 
-        items = self.config.watchlist
+        items = self.watchlist
         if single_sn:
             items = [
                 next(
@@ -852,7 +875,7 @@ class AnimeManagerApp:
             status=status,
             enabled=True,
         )
-        self.config, is_new = self.config_store.add_or_update_anime(self.config, item)
+        self.watchlist, is_new = self.watchlist_store.add_or_update(self.watchlist, item)
         action_word = "新增" if is_new else "更新"
         _print(f"\n[bold green]已{action_word}追番項目：{item.name}[/bold green] (SN: {item.sn}｜{_format_ep_ratio(item.online_episodes, item.total_episodes)}｜{_format_status_schedule(item)})")
 
@@ -870,7 +893,7 @@ class AnimeManagerApp:
 
     def _sync_existing_metadata_flow(self) -> None:
         """批次同步既有作品的線上集數、連載／已完結狀態、每週更新時間與預定總集數。"""
-        if not self.config.watchlist:
+        if not self.watchlist:
             _print("[yellow]追番清單是空的。[/yellow]")
             return
 
@@ -879,10 +902,10 @@ class AnimeManagerApp:
             return
 
         if target_raw == "all":
-            targets = list(self.config.watchlist)
+            targets = list(self.watchlist)
         else:
             tokens = parse_multi_targets(target_raw)
-            targets = [item for t in tokens if (item := self.config_store.find_by_target(self.config, t))]
+            targets = [item for t in tokens if (item := self.watchlist_store.find_by_target(self.watchlist, t))]
             if not targets:
                 _print("[red]找不到指定的項目。[/red]")
                 return
@@ -943,14 +966,14 @@ class AnimeManagerApp:
                 _print(f"  [dim]資料已是最新（線上 {meta.online_count} 集｜{extra}）[/dim]")
 
         if updated_count:
-            self.config_store.save(self.config)
+            self.watchlist_store.save(self.watchlist)
             _print(f"\n[bold green]共更新 {updated_count} 部作品資訊並存檔。[/bold green]")
 
     def _edit_single_anime_flow(self) -> None:
         raw = _ask("輸入要編輯的作品編號或 SN（q 取消）", default="q")
         if raw.lower() == "q":
             return
-        item = self.config_store.find_by_target(self.config, raw)
+        item = self.watchlist_store.find_by_target(self.watchlist, raw)
         if not item:
             _print("[red]找不到該項目。[/red]")
             return
@@ -959,7 +982,7 @@ class AnimeManagerApp:
         item.resolution = self._prompt_resolution_picker(item.resolution)
         item.total_episodes = self._prompt_total_episodes(item.total_episodes, min_episodes=item.online_episodes or 1)
         item.status, item.schedule_note = self._prompt_schedule_picker(item.schedule_note)
-        self.config_store.save(self.config)
+        self.watchlist_store.save(self.watchlist)
         _print(f"[green]已更新《{item.name}》設定。[/green]")
 
     def action_manage_watchlist(self) -> None:
@@ -975,7 +998,7 @@ class AnimeManagerApp:
                 table.add_column("畫質", width=5)
                 table.add_column("線上/總", width=7, justify="center")
                 table.add_column("狀態 / 更新時間", max_width=20)
-                for idx, item in enumerate(self.config.watchlist, 1):
+                for idx, item in enumerate(self.watchlist, 1):
                     st = "[green]啟用[/green]" if item.enabled else "[dim]暫停[/dim]"
                     sched_col = _format_status_schedule(item)
                     if item.status == "已完結":
@@ -993,7 +1016,7 @@ class AnimeManagerApp:
                     )
                 console.print(table)
             else:
-                for idx, item in enumerate(self.config.watchlist, 1):
+                for idx, item in enumerate(self.watchlist, 1):
                     st = "啟用" if item.enabled else "暫停"
                     ratio = _format_ep_ratio(item.online_episodes, item.total_episodes)
                     print(f"  {idx}. [{st}] {item.name} | SN={item.sn} | {item.resolution}P | 集數={ratio} | {_format_status_schedule(item)}")
@@ -1029,7 +1052,7 @@ class AnimeManagerApp:
             elif sub == "4":
                 raw = _ask("輸入編號或 SN（可多選，如 2,3，q 取消）", default="q")
                 if raw.lower() != "q":
-                    toggled = self.config_store.toggle_many(self.config, parse_multi_targets(raw))
+                    toggled = self.watchlist_store.toggle_many(self.watchlist, parse_multi_targets(raw))
                     if toggled:
                         for t in toggled:
                             _print(f"  [green]{t.name} → {'啟用' if t.enabled else '暫停'}[/green]")
@@ -1039,7 +1062,7 @@ class AnimeManagerApp:
             elif sub == "5":
                 raw = _ask("輸入要刪除的編號或 SN（可多選，如 5,6，q 取消）", default="q")
                 if raw.lower() != "q":
-                    removed = self.config_store.remove_many(self.config, parse_multi_targets(raw))
+                    removed = self.watchlist_store.remove_many(self.watchlist, parse_multi_targets(raw))
                     if removed:
                         _print("[green]已刪除：[/green]" + "、".join(r.name for r in removed))
                     else:
@@ -1185,6 +1208,8 @@ class AnimeManagerApp:
             _print(f"[green]成功：{msg}[/green]" if ok else f"[yellow]{msg}[/yellow]")
 
     def run_interactive(self, skip_startup_check: bool = False) -> None:
+        if self.migrated_watchlist:
+            _print(f"[green]已自動將舊版追番清單遷移至獨立檔案：{self.watchlist_store.watchlist_path.name}（manager_config.json 已清理）[/green]")
         if self.config.check_on_startup and not skip_startup_check:
             self._print_startup_briefing()
 

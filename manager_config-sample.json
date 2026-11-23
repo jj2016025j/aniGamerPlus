@@ -1,0 +1,33 @@
+{
+  "anigamer_dir": "",
+  "bangumi_dir": "bangumi",
+  "watchlist_file": "watchlist.json",
+  "default_resolution": "1080",
+  "cooldown_seconds": 10,
+  "dedup_mode": "file_only",
+  "upgrade_lower_resolution": false,
+  "check_on_startup": true,
+  "clear_screen_on_menu": true,
+  "auto_check_audio": true,
+  "auto_fix_audio": false,
+  "notifications": {
+    "ntfy": {
+      "enabled": false,
+      "endpoint": "https://ntfy.sh/your-private-topic"
+    },
+    "discord": {
+      "enabled": false,
+      "webhook_url": ""
+    },
+    "telegram": {
+      "enabled": false,
+      "token": "",
+      "chat_id": ""
+    },
+    "line": {
+      "enabled": false,
+      "channel_access_token": "",
+      "user_id": ""
+    }
+  }
+}

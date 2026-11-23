@@ -178,7 +178,7 @@ class Notifier:
         req = urllib.request.Request(
             webhook,
             data=body,
-            headers={"Content-Type": "application/json", "User-Agent": "aniGamerPlus-Manager/1.4.2"},
+            headers={"Content-Type": "application/json", "User-Agent": "aniGamerPlus-Manager/1.5.0"},
             method="POST",
         )
         with urllib.request.urlopen(req, timeout=10):

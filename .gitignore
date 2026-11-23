@@ -129,9 +129,9 @@ cookie2.txt
 **/.DS_Store
 
 # 個人憑證與執行期紀錄（嚴禁上傳）
-cookie.txt
 download_history.json
 manager_config.json
+watchlist.json
 aniGamer.db
 bangumi/
 .venv/
