@@ -1,4 +1,4 @@
-"""終端互動介面與命令列控制器 v1.5.0（表格化檢查與 SN 顯示、區間壓縮、精準補齊狀態與集數）。"""
+"""終端互動介面與命令列控制器 v1.5.1（表格化檢查與 SN 顯示、區間壓縮、精準補齊狀態與集數）。"""
 
 from __future__ import annotations
 
@@ -42,6 +42,7 @@ from .metadata_fetcher import (
     search_anigamer,
 )
 from .notifier import (
+    DigestEntry,
     DownloadedRecord,
     Notifier,
     format_anime_added_notice,
@@ -316,9 +317,9 @@ class AnimeManagerApp:
         return snapshots
 
     def _build_digest_from_snapshots(self, snapshots: list[AnimeScanSnapshot]) -> tuple[str, str]:
-        """將掃描快照轉成簡潔區間式手機推播簡報（不逐集展開洗版）。"""
-        new_updates: list[str] = []
-        up_to_date: list[str] = []
+        """將掃描快照轉成結構化行動友善簡報。"""
+        new_entries: list[DigestEntry] = []
+        up_to_date_entries: list[DigestEntry] = []
         errors: list[str] = []
 
         for snap in snapshots:
@@ -326,21 +327,48 @@ class AnimeManagerApp:
                 errors.append(f"{snap.item.name}：{snap.error or '無法解析'}")
                 continue
             ratio = _format_ep_ratio(snap.online_count, snap.item.total_episodes)
-            sched_str = f"｜{_format_status_schedule(snap.item)}" if _format_status_schedule(snap.item) != "-" else ""
+            sched_raw = _format_status_schedule(snap.item)
+            sched = "" if sched_raw == "-" else sched_raw
             if snap.diff.missing_episodes:
                 range_str = format_episode_ranges(snap.diff.missing_episodes, compact=False)
-                cnt = len(snap.diff.missing_episodes)
-                cnt_suffix = f"（共 {cnt} 集）" if cnt > 1 else ""
-                new_updates.append(
-                    f"《{snap.title}》可下載 {range_str}{cnt_suffix}（線上 {ratio} 集{sched_str}）"
+                new_entries.append(
+                    DigestEntry(
+                        title=snap.title,
+                        progress=ratio,
+                        schedule=sched,
+                        missing_text=range_str,
+                        missing_count=len(snap.diff.missing_episodes),
+                    )
                 )
             else:
-                up_to_date.append(
-                    f"《{snap.title}》已追平 {snap.diff.total_local_count}/{snap.online_count} 集（總進度 {ratio}{sched_str}）"
+                up_to_date_entries.append(
+                    DigestEntry(
+                        title=snap.title,
+                        progress=ratio,
+                        schedule=sched,
+                    )
                 )
 
         paused = [w.name for w in self.watchlist if not w.enabled]
-        return format_check_digest(new_updates, up_to_date, paused, errors)
+        return format_check_digest(new_entries, up_to_date_entries, paused, errors)
+
+    def _dispatch_notifications_live(self, title: str, body: str) -> None:
+        """逐管道即時發送推播，避免全部同時彈出與洩露冗長網址，僅於失敗時顯示診斷原因。"""
+        providers = self.notifier.enabled_providers
+        if not providers:
+            _print("[yellow]目前尚未啟用任何推播管道。[/yellow]")
+            return
+
+        _print(f"[dim]推播發送中 ({len(providers)} 個管道)...[/dim]")
+        ok_count = 0
+        for label, ok, detail in self.notifier.send_iter(title, body):
+            if ok:
+                ok_count += 1
+                _print(f"  [green]✓[/green] {label}")
+            else:
+                _print(f"  [red]✗[/red] {label} [dim]({detail})[/dim]")
+        color = "green" if ok_count == len(providers) else "yellow"
+        _print(f"[{color}]推播完成：{ok_count}/{len(providers)} 成功[/{color}]")
 
     def _print_startup_briefing(self) -> None:
         enabled_items = [w for w in self.watchlist if w.enabled]
@@ -397,7 +425,7 @@ class AnimeManagerApp:
         body = f"{status_line}\n\n[bold]{header_title}：[/bold]\n" + "\n".join(brief_lines)
 
         if HAS_RICH and console:
-            console.print(Panel(body, title="aniGamerPlus 增量下載管理器 v1.5.0", border_style="cyan", padding=(0, 2)))
+            console.print(Panel(body, title="aniGamerPlus 增量下載管理器 v1.5.1", border_style="cyan", padding=(0, 2)))
         else:
             print("=" * 72)
             _print(body)
@@ -576,32 +604,46 @@ class AnimeManagerApp:
         print()
         self._render_check_tables(snapshots, show_sn_table=True)
 
-        # 檢查 VIP 升級前置狀態提示
+        # 檢查 VIP 升級前置狀態（合併提示，避免每部作品重複洗版同一句非 VIP 警告）
         vip_eligibility_cache: dict[int, tuple[bool, bool, str]] = {}
         upgrade_plans: dict[str, list[EpisodeInfo]] = {}
+        skipped_upgrade_titles: list[str] = []
+        skipped_reason = ""
 
         for snap in snapshots:
             if snap.error or not snap.diff or not snap.diff.upgradable_episodes:
                 continue
             target_res_int = parse_resolution_int(snap.item.resolution)
             if target_res_int not in vip_eligibility_cache:
-                _print("\n[dim]正在執行 720P->1080P 升級前置 VIP 檢查...[/dim]")
+                _print("\n[dim]正在確認 720P→1080P 升級 VIP 權限...[/dim]")
                 elig = check_vip_upgrade_eligibility(self.env.cookie_path, target_res_int)
                 vip_eligibility_cache[target_res_int] = (elig.allowed, elig.certain, elig.reason)
             allowed, _, reason = vip_eligibility_cache[target_res_int]
             if allowed:
-                _print(f"[green]《{snap.title}》{reason}[/green]")
                 upgrade_plans[snap.item.sn] = [ep for ep, _ in snap.diff.upgradable_episodes]
             else:
-                _print(f"[yellow]《{snap.title}》{reason}[/yellow]")
+                skipped_upgrade_titles.append(snap.title)
+                skipped_reason = reason
+
+        if upgrade_plans:
+            _print(f"[green]VIP 驗證通過：將對 {len(upgrade_plans)} 部作品執行畫質升級。[/green]")
+        elif skipped_upgrade_titles:
+            _print(
+                f"[yellow]已略過 {len(skipped_upgrade_titles)} 部作品的 720P→1080P 升級（目前非 VIP 權限，避免重複下載 720P）。[/yellow]"
+            )
 
         if not download:
+            total_miss = sum(len(s.diff.missing_episodes) for s in snapshots if s.diff)
+            if total_miss == 0:
+                _print("\n[bold green]✓ 檢查完成：所有啟用中作品皆已追平，目前沒有待下載集數。[/bold green]")
+            else:
+                _print(f"\n[bold cyan]✓ 檢查完成：共有 {total_miss} 集新進度可下載。[/bold cyan]")
+
             if snapshots and self.notifier.enabled:
-                should_push = push_check_notify or _confirm("\n是否將這份追番更新簡報推播到手機？", default=False)
+                should_push = push_check_notify or _confirm("\n是否將這份追番簡報推播到手機？", default=False)
                 if should_push:
                     n_title, n_body = self._build_digest_from_snapshots(snapshots)
-                    for _, ok, msg in self.notifier.send(n_title, n_body):
-                        _print(f"[green]推播：{msg}[/green]" if ok else f"[yellow]推播異常：{msg}[/yellow]")
+                    self._dispatch_notifications_live(n_title, n_body)
             return
 
         # ===== 開始執行下載 =====
@@ -748,17 +790,25 @@ class AnimeManagerApp:
                 remaining_after,
                 interrupted=was_interrupted,
             )
-            title_color = "bold yellow" if was_interrupted else "bold green"
-            _print(f"\n[{title_color}]{n_title}[/{title_color}]\n{n_body}")
+            border = "yellow" if was_interrupted else "green"
+            print()
+            if HAS_RICH and console:
+                console.print(Panel(n_body, title=n_title, border_style=border, padding=(0, 2)))
+            else:
+                print(f"=== {n_title} ===\n{n_body}")
+
+            if not was_interrupted and not downloaded_fail:
+                _print(f"[bold green]✓ 全部下載任務已完成（本次共下載 {len(downloaded_ok)} 集）。[/bold green]")
 
             if self.notifier.enabled:
-                # 若為手動中斷且處於互動模式，改為先詢問再推播，避免人在電腦前還被四個管道轟炸
                 should_push = True
                 if was_interrupted:
                     should_push = _confirm("\n本次為手動中斷，是否仍將中斷結算推播到手機？", default=False) if interactive else False
                 if should_push:
-                    for _, ok, msg in self.notifier.send(n_title, n_body):
-                        _print(f"[dim]推播：{msg}[/dim]" if ok else f"[yellow]推播異常：{msg}[/yellow]")
+                    print()
+                    self._dispatch_notifications_live(n_title, n_body)
+        else:
+            _print("\n[bold green]✓ 任務完成：所有啟用中作品皆已追平，本次無需下載。[/bold green]")
 
     def action_ad_hoc_download(self) -> None:
         raw = _ask("\n請貼上動畫瘋網址或 SN（輸入 q 取消）", default="q")
@@ -846,24 +896,52 @@ class AnimeManagerApp:
                 _print(f"[red]解析該作品失敗：{exc}[/red]")
                 return
 
-        _print(
-            f"\n[green]已取得作品資訊：[/green][bold]{meta.title}[/bold] "
-            f"(基準 SN: {meta.base_sn}｜線上 {meta.online_count} 集"
-            + (f"｜狀態：{meta.schedule_note}" if meta.schedule_note else "")
-            + (f"｜預計全 {meta.total_episodes} 話 ({meta.total_source})" if meta.total_episodes else "")
-            + (f"｜最新上架：{meta.latest_upload_at}" if meta.latest_upload_at else "")
-            + ")"
+        preview_lines = (
+            f"[bold]作品名稱：[/bold]{meta.title}\n"
+            f"[bold]基準 SN：[/bold]{meta.base_sn}   "
+            f"[bold]目標畫質：[/bold]{self.config.default_resolution}P   "
+            f"[bold]線上 / 總集：[/bold]{_format_ep_ratio(meta.online_count, meta.total_episodes)}"
+            + (f" ({meta.total_source})" if meta.total_source else "")
+            + f"\n[bold]狀態 / 時間：[/bold]{meta.schedule_note or '未偵測'}"
+            + (f"   [dim](最新上架 {meta.latest_upload_at})[/dim]" if meta.latest_upload_at else "")
         )
+        print()
+        if HAS_RICH and console:
+            console.print(Panel(preview_lines, title="已自動偵測作品資訊", border_style="green", padding=(0, 2)))
+        else:
+            _print(preview_lines)
 
-        while True:
-            name = _ask("作品名稱（按 Enter 使用官方標題）", default=meta.title)
-            if len(name) >= 2 and not name.isdigit():
-                break
-            _print("[red]作品名稱過短或不能為純數字。[/red]")
+        _print("\n  [cyan]1[/cyan]. 快速導入（直接套用上方偵測結果）")
+        _print("  [cyan]2[/cyan]. 逐步自訂設定（共 4 項：名稱 → 畫質 → 總集數 → 更新時間）")
+        _print("  [cyan]q[/cyan]. 取消")
+        import_mode = _ask("請選擇導入方式", default="1").lower()
+        if import_mode == "q":
+            _print("[dim]已取消新增。[/dim]")
+            return
 
-        res = self._prompt_resolution_picker(self.config.default_resolution)
-        total_eps = self._prompt_total_episodes(meta.total_episodes, min_episodes=meta.online_count)
-        status, schedule_note = self._prompt_schedule_picker(meta.schedule_note)
+        if import_mode == "2":
+            total_steps = 4
+            _print(f"\n[bold cyan]步驟 [1/{total_steps}] 作品名稱[/bold cyan]")
+            while True:
+                name = _ask("作品名稱（按 Enter 使用官方標題）", default=meta.title)
+                if len(name) >= 2 and not name.isdigit():
+                    break
+                _print("[red]作品名稱過短或不能為純數字。[/red]")
+
+            _print(f"\n[bold cyan]步驟 [2/{total_steps}] 目標畫質[/bold cyan]")
+            res = self._prompt_resolution_picker(self.config.default_resolution)
+
+            _print(f"\n[bold cyan]步驟 [3/{total_steps}] 預計總集數[/bold cyan]")
+            total_eps = self._prompt_total_episodes(meta.total_episodes, min_episodes=meta.online_count)
+
+            _print(f"\n[bold cyan]步驟 [4/{total_steps}] 連載狀態與更新時間[/bold cyan]")
+            status, schedule_note = self._prompt_schedule_picker(meta.schedule_note)
+        else:
+            name = meta.title
+            res = self.config.default_resolution
+            total_eps = meta.total_episodes
+            status = meta.status
+            schedule_note = meta.schedule_note
 
         item = AnimeWatchItem(
             name=name,
@@ -877,7 +955,7 @@ class AnimeManagerApp:
         )
         self.watchlist, is_new = self.watchlist_store.add_or_update(self.watchlist, item)
         action_word = "新增" if is_new else "更新"
-        _print(f"\n[bold green]已{action_word}追番項目：{item.name}[/bold green] (SN: {item.sn}｜{_format_ep_ratio(item.online_episodes, item.total_episodes)}｜{_format_status_schedule(item)})")
+        _print(f"\n[bold green]✓ 已{action_word}追番項目：{item.name}[/bold green] (SN: {item.sn}｜{_format_ep_ratio(item.online_episodes, item.total_episodes)}｜{_format_status_schedule(item)})")
 
         if is_new and self.notifier.enabled and _confirm("是否順便推播「新增追番通知」到手機？", default=False):
             n_title, n_body = format_anime_added_notice(
@@ -888,8 +966,7 @@ class AnimeManagerApp:
                 schedule_note=item.schedule_note,
                 resolution=item.resolution,
             )
-            for _, ok, msg in self.notifier.send(n_title, n_body):
-                _print(f"[dim]推播：{msg}[/dim]" if ok else f"[yellow]推播異常：{msg}[/yellow]")
+            self._dispatch_notifications_live(n_title, n_body)
 
     def _sync_existing_metadata_flow(self) -> None:
         """批次同步既有作品的線上集數、連載／已完結狀態、每週更新時間與預定總集數。"""
@@ -978,12 +1055,15 @@ class AnimeManagerApp:
             _print("[red]找不到該項目。[/red]")
             return
 
-        _print(f"\n[bold]編輯：《{item.name}》 (SN: {item.sn})[/bold]")
+        _print(f"\n[bold]編輯：《{item.name}》 (SN: {item.sn}) — 共 3 項設定[/bold]")
+        _print("\n[bold cyan]步驟 [1/3] 目標畫質[/bold cyan]")
         item.resolution = self._prompt_resolution_picker(item.resolution)
+        _print("\n[bold cyan]步驟 [2/3] 預計總集數[/bold cyan]")
         item.total_episodes = self._prompt_total_episodes(item.total_episodes, min_episodes=item.online_episodes or 1)
+        _print("\n[bold cyan]步驟 [3/3] 連載狀態與更新時間[/bold cyan]")
         item.status, item.schedule_note = self._prompt_schedule_picker(item.schedule_note)
         self.watchlist_store.save(self.watchlist)
-        _print(f"[green]已更新《{item.name}》設定。[/green]")
+        _print(f"\n[bold green]✓ 已更新《{item.name}》設定。[/bold green]")
 
     def action_manage_watchlist(self) -> None:
         while True:
@@ -1203,9 +1283,13 @@ class AnimeManagerApp:
                 return
 
         n_title, n_body = self._build_digest_from_snapshots(snaps)
-        _print(f"\n[bold cyan]即將推播內容預覽：[/bold cyan]\n{n_title}\n{n_body}\n")
-        for _, ok, msg in self.notifier.send(n_title, n_body):
-            _print(f"[green]成功：{msg}[/green]" if ok else f"[yellow]{msg}[/yellow]")
+        print()
+        if HAS_RICH and console:
+            console.print(Panel(n_body, title=f"推播預覽｜{n_title}", border_style="cyan", padding=(0, 2)))
+        else:
+            print(f"=== 推播預覽｜{n_title} ===\n{n_body}")
+        print()
+        self._dispatch_notifications_live(n_title, n_body)
 
     def run_interactive(self, skip_startup_check: bool = False) -> None:
         if self.migrated_watchlist:
@@ -1218,15 +1302,15 @@ class AnimeManagerApp:
             self.show_banner()
 
             _print("\n[bold cyan]【追番與下載】[/bold cyan]")
-            _print("  [cyan]1[/cyan]. 下載啟用中追番的新集數    [cyan]2[/cyan]. 僅檢查新集數（表格＋推播）")
-            _print("  [cyan]3[/cyan]. 管理追番清單與設定        [cyan]4[/cyan]. 臨時指定網址／SN 下載")
+            _print("  [cyan]1[/cyan]. 僅檢查新集數（表格＋推播）    [cyan]2[/cyan]. 下載啟用中追番的新集數")
+            _print("  [cyan]3[/cyan]. 管理追番清單與設定            [cyan]4[/cyan]. 臨時指定網址／SN 下載")
             _print("\n[bold cyan]【工具與維護】[/bold cyan]")
-            _print("  [cyan]5[/cyan]. Cookie 管理 (VIP/登入)    [cyan]6[/cyan]. 音軌檢查與 QuickTime 修復")
-            _print("  [cyan]7[/cyan]. 開啟下載資料夾            [cyan]8[/cyan]. 立即推播「目前追番簡報」到手機")
-            _print("\n  [dim]q. 離開程式[/dim]")
+            _print("  [cyan]5[/cyan]. Cookie 管理 (VIP/登入)        [cyan]6[/cyan]. 推播「目前追番簡報」到手機")
+            _print("  [cyan]7[/cyan]. 音軌檢查與 QuickTime 修復     [cyan]8[/cyan]. 開啟下載資料夾")
+            _print("\n  [dim]q. 離開程式（預設）[/dim]")
 
             try:
-                choice = _ask("\n請選擇功能", default="1").lower()
+                choice = _ask("\n請選擇功能", default="q").lower()
             except KeyboardInterrupt:
                 _print("\n[dim]已中斷並離開程式。[/dim]")
                 break
@@ -1237,10 +1321,10 @@ class AnimeManagerApp:
 
             try:
                 if choice == "1":
-                    self.action_check_or_update(download=True)
+                    self.action_check_or_update(download=False)
                     _pause()
                 elif choice == "2":
-                    self.action_check_or_update(download=False)
+                    self.action_check_or_update(download=True)
                     _pause()
                 elif choice == "3":
                     self.action_manage_watchlist()
@@ -1250,15 +1334,15 @@ class AnimeManagerApp:
                 elif choice == "5":
                     self.action_setup_cookie()
                 elif choice == "6":
-                    self.action_audio_check_and_fix()
+                    self.action_send_digest_notification(force_rescan=True)
                     _pause()
                 elif choice == "7":
-                    self.env.bangumi_dir.mkdir(parents=True, exist_ok=True)
-                    _open_folder(self.env.bangumi_dir, self.env.raw_os)
-                    _print(f"[green]已開啟資料夾：{self.env.bangumi_dir}[/green]")
+                    self.action_audio_check_and_fix()
                     _pause()
                 elif choice == "8":
-                    self.action_send_digest_notification(force_rescan=True)
+                    self.env.bangumi_dir.mkdir(parents=True, exist_ok=True)
+                    _open_folder(self.env.bangumi_dir, self.env.raw_os)
+                    _print(f"[green]✓ 已開啟資料夾：{self.env.bangumi_dir}[/green]")
                     _pause()
                 else:
                     _print("[yellow]無效選項，請輸入 1~8 或 q。[/yellow]")

@@ -1,4 +1,4 @@
-"""四管道手機推播模組（ntfy / Discord / Telegram / LINE）與結構化分組報告產生器。"""
+"""四管道手機推播模組（ntfy / Discord / Telegram / LINE）與行動友善排版報告產生器。"""
 
 from __future__ import annotations
 
@@ -7,24 +7,36 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, Callable, Iterator
 
 from .episode_fetcher import EpisodeInfo, format_episode_ranges
+
+PROVIDER_LABELS = {
+    "ntfy": "ntfy",
+    "discord": "Discord",
+    "telegram": "Telegram",
+    "line": "LINE",
+}
 
 
 @dataclass
 class DownloadedRecord:
     title: str
     episode: EpisodeInfo
-    resolution_label: str = ""  # 例如 "720P" / "1080P" / "1080P升級"
+    resolution_label: str = ""
 
 
-def format_grouped_downloads(records: list[DownloadedRecord]) -> list[str]:
-    """
-    依作品與畫質標籤分組，並將連續集數壓縮為區間，避免長片名重複洗版：
-    - 單集：學生會也有洞！ 第 8 集 (720P)
-    - 連續多集：被放逐的作弊賦予魔術師享受隨心所欲的第二人生。 第 1~5 集 (720P)
-    """
+@dataclass
+class DigestEntry:
+    title: str
+    progress: str  # e.g. "8/12"
+    schedule: str = ""  # e.g. "每週日 01:00"
+    missing_text: str = ""  # e.g. "第 8 集" or "第 1~5 集"
+    missing_count: int = 0
+
+
+def format_grouped_downloads(records: list[DownloadedRecord]) -> list[tuple[str, str]]:
+    """依作品與畫質標籤分組並壓縮區間，回傳 [(作品名, 明細行), ...]。"""
     if not records:
         return []
 
@@ -37,47 +49,63 @@ def format_grouped_downloads(records: list[DownloadedRecord]) -> list[str]:
             order.append(key)
         groups[key].append(rec.episode)
 
-    lines: list[str] = []
+    rows: list[tuple[str, str]] = []
     for title, res_label in order:
         eps = groups[(title, res_label)]
         range_str = format_episode_ranges(eps, compact=False)
-        suffix = f" ({res_label})" if res_label else ""
-        lines.append(f"《{title}》{range_str}{suffix}")
-    return lines
+        suffix = f"｜{res_label}" if res_label else ""
+        rows.append((title, f"{range_str}{suffix}"))
+    return rows
 
 
 def format_check_digest(
-    new_updates: list[str],
-    up_to_date: list[str],
+    new_entries: list[DigestEntry],
+    up_to_date_entries: list[DigestEntry],
     paused_names: list[str],
     errors: list[str] | None = None,
 ) -> tuple[str, str]:
-    """產生「追番檢查／上線簡報」通知內容。"""
+    """產生結構化、適合手機螢幕閱讀的「追番進度簡報」。"""
     now_str = datetime.now().strftime("%m/%d %H:%M")
     title = f"動畫瘋追番簡報 ({now_str})"
-    lines: list[str] = []
+    sections: list[str] = []
 
-    if new_updates:
-        lines.append("【有新集數可下載】")
-        lines.extend(f"• {row}" for row in new_updates)
+    total_new_eps = sum(e.missing_count for e in new_entries)
+    if new_entries:
+        sections.append(f"摘要：{len(new_entries)} 部有新集數（共 {total_new_eps} 集可下載）")
     else:
-        lines.append("【目前沒有未下載的新集數】")
+        sections.append("摘要：啟用中作品皆已追平，尚無新集數")
 
-    if up_to_date:
-        lines.append("")
-        lines.append("【已追平最新進度】")
-        lines.extend(f"• {row}" for row in up_to_date)
+    if new_entries:
+        block = [f"[待下載新集數] ({len(new_entries)} 部)"]
+        for idx, e in enumerate(new_entries, 1):
+            meta_parts = [f"待補 {e.missing_text}", f"進度 {e.progress}"]
+            if e.schedule:
+                meta_parts.append(e.schedule)
+            block.append(f"{idx}. {e.title}")
+            block.append("   " + "｜".join(meta_parts))
+        sections.append("\n".join(block))
+
+    if up_to_date_entries:
+        block = [f"[已追平] ({len(up_to_date_entries)} 部)"]
+        for idx, e in enumerate(up_to_date_entries, 1):
+            meta_parts = [f"進度 {e.progress}"]
+            if e.schedule:
+                meta_parts.append(e.schedule)
+            block.append(f"{idx}. {e.title}")
+            block.append("   " + "｜".join(meta_parts))
+        sections.append("\n".join(block))
 
     if paused_names:
-        lines.append("")
-        lines.append(f"【暫停追蹤 ({len(paused_names)} 部)】" + "、".join(paused_names))
+        block = [f"[暫停追蹤] ({len(paused_names)} 部)"]
+        block.extend(f"• {name}" for name in paused_names)
+        sections.append("\n".join(block))
 
     if errors:
-        lines.append("")
-        lines.append("【檢查異常】")
-        lines.extend(f"• {err}" for err in errors)
+        block = [f"[檢查異常] ({len(errors)} 項)"]
+        block.extend(f"• {err}" for err in errors)
+        sections.append("\n".join(block))
 
-    return title, "\n".join(lines)
+    return title, "\n\n".join(sections)
 
 
 def format_download_report(
@@ -86,33 +114,34 @@ def format_download_report(
     remaining: list[str],
     interrupted: bool = False,
 ) -> tuple[str, str]:
-    """產生「下載完成報告」或「下載中斷結算」通知內容（依作品分組＋區間壓縮）。"""
+    """產生結構化、行動友善的「下載完成報告」或「下載中斷結算」。"""
     now_str = datetime.now().strftime("%m/%d %H:%M")
     heading = "動畫瘋下載中斷結算" if interrupted else "動畫瘋下載完成報告"
     title = f"{heading} ({now_str})"
-    lines: list[str] = []
+    sections: list[str] = []
 
     if downloaded:
-        grouped_lines = format_grouped_downloads(downloaded)
-        lines.append(f"【本次已下載 ({len(downloaded)} 集)】")
-        lines.extend(f"• {row}" for row in grouped_lines)
+        grouped = format_grouped_downloads(downloaded)
+        block = [f"[本次已下載] ({len(downloaded)} 集)"]
+        for idx, (anime_title, detail) in enumerate(grouped, 1):
+            block.append(f"{idx}. {anime_title}")
+            block.append(f"   {detail}")
+        sections.append("\n".join(block))
 
     if failed:
-        if lines:
-            lines.append("")
-        lines.append(f"【下載失敗／中斷 ({len(failed)} 集)】")
-        lines.extend(f"• {item}" for item in failed)
+        block = [f"[失敗 / 中斷] ({len(failed)} 項)"]
+        block.extend(f"• {item}" for item in failed)
+        sections.append("\n".join(block))
 
     if remaining:
-        if lines:
-            lines.append("")
-        lines.append("【尚有未下載集數】")
-        lines.extend(f"• {item}" for item in remaining)
+        block = [f"[尚有未下載] ({len(remaining)} 部)"]
+        block.extend(f"• {item}" for item in remaining)
+        sections.append("\n".join(block))
 
-    if not lines:
-        lines.append("本次檢查未執行任何新下載。")
+    if not sections:
+        sections.append("本次檢查未執行任何新下載。")
 
-    return title, "\n".join(lines)
+    return title, "\n\n".join(sections)
 
 
 def format_anime_added_notice(
@@ -125,19 +154,18 @@ def format_anime_added_notice(
 ) -> tuple[str, str]:
     """產生「新增追番通知」內容。"""
     title = f"已新增追番：{name}"
-    total_str = f" / 預計全 {total_episodes} 話" if total_episodes else ""
-    sched_str = schedule_note or "未設定（已完結或不定時）"
+    progress = f"{online_count}/{total_episodes}" if total_episodes else f"{online_count}/?"
+    sched_str = schedule_note or "未設定"
     msg = (
-        f"• 作品：{name} (SN: {sn})\n"
-        f"• 目前線上可下載：{online_count} 集{total_str}\n"
-        f"• 目標畫質：{resolution}P\n"
-        f"• 更新時間：{sched_str}"
+        f"作品：{name}\n"
+        f"基準 SN：{sn}｜畫質：{resolution}P\n"
+        f"線上進度：{progress} 集｜狀態：{sched_str}"
     )
     return title, msg
 
 
 class Notifier:
-    """獨立管理四種手機推播管道，可單選或同時多管齊下。"""
+    """獨立管理四種手機推播管道，支援逐管道即時回報進度與精簡輸出。"""
 
     PROVIDERS = ("ntfy", "discord", "telegram", "line")
 
@@ -160,7 +188,7 @@ class Notifier:
     def _send_ntfy(self, cfg: dict[str, Any], title: str, message: str) -> tuple[bool, str]:
         endpoint = str(cfg.get("endpoint", "")).strip()
         if not endpoint:
-            return False, "ntfy：缺少 endpoint 網址"
+            return False, "缺少 endpoint 網址"
         req = urllib.request.Request(
             endpoint,
             data=message.encode("utf-8"),
@@ -168,29 +196,29 @@ class Notifier:
             method="POST",
         )
         with urllib.request.urlopen(req, timeout=10):
-            return True, f"ntfy：已發送至 {endpoint}"
+            return True, "已送出"
 
     def _send_discord(self, cfg: dict[str, Any], title: str, message: str) -> tuple[bool, str]:
         webhook = str(cfg.get("webhook_url") or cfg.get("endpoint") or "").strip()
         if not webhook:
-            return False, "discord：缺少 webhook_url"
+            return False, "缺少 webhook_url"
         body = json.dumps({"content": f"**{title}**\n{message}"}).encode("utf-8")
         req = urllib.request.Request(
             webhook,
             data=body,
-            headers={"Content-Type": "application/json", "User-Agent": "aniGamerPlus-Manager/1.5.0"},
+            headers={"Content-Type": "application/json", "User-Agent": "aniGamerPlus-Manager/1.5.1"},
             method="POST",
         )
         with urllib.request.urlopen(req, timeout=10):
-            return True, "discord：已發送至 Webhook"
+            return True, "已送出"
 
     def _send_telegram(self, cfg: dict[str, Any], title: str, message: str) -> tuple[bool, str]:
         token = str(cfg.get("token", "")).strip()
         chat_id = str(cfg.get("chat_id", "")).strip()
         if not token or not chat_id:
-            return False, "telegram：缺少 token 或 chat_id"
+            return False, "缺少 token 或 chat_id"
         url = f"https://api.telegram.org/bot{token}/sendMessage"
-        body = json.dumps({"chat_id": chat_id, "text": f"{title}\n{message}"}).encode("utf-8")
+        body = json.dumps({"chat_id": chat_id, "text": f"{title}\n\n{message}"}).encode("utf-8")
         req = urllib.request.Request(
             url,
             data=body,
@@ -198,21 +226,18 @@ class Notifier:
             method="POST",
         )
         with urllib.request.urlopen(req, timeout=10):
-            return True, "telegram：已發送至指定對話"
+            return True, "已送出"
 
     def _send_line(self, cfg: dict[str, Any], title: str, message: str) -> tuple[bool, str]:
         token = str(cfg.get("channel_access_token") or cfg.get("token") or "").strip()
         user_id = str(cfg.get("user_id") or cfg.get("to") or "").strip()
         if not token or not user_id:
-            return False, "line：缺少 channel_access_token 或 user_id"
+            return False, "缺少 channel_access_token 或 user_id"
         if not user_id.startswith(("U", "C", "R")) or len(user_id) < 20:
-            return (
-                False,
-                "line：user_id 格式不正確（必須是 LINE Developers 後台 Basic settings 最下方的 Your user ID，大寫 U 開頭約 33 碼）",
-            )
+            return False, "user_id 格式不正確（須為大寫 U 開頭約 33 碼）"
 
         url = "https://api.line.me/v2/bot/message/push"
-        text_payload = f"【{title}】\n{message}"[:4900]
+        text_payload = f"【{title}】\n\n{message}"[:4900]
         body = json.dumps(
             {
                 "to": user_id,
@@ -230,41 +255,36 @@ class Notifier:
         )
         try:
             with urllib.request.urlopen(req, timeout=10):
-                return True, "line：已透過 Messaging API 推播至 LINE"
+                return True, "已送出"
         except urllib.error.HTTPError as exc:
-            detail = ""
-            try:
-                err_body = exc.read().decode("utf-8", errors="ignore")
-                err_json = json.loads(err_body)
-                detail = err_json.get("message", err_body)
-            except Exception:
-                detail = str(exc.reason)
-
             hints = {
-                401: "Channel access token 無效或已過期（請從 Messaging API 分頁最下方重新 Issue，勿填頻道秘密）。",
-                400: "user_id 錯誤或尚未將此官方帳號加為好友。",
-                429: "本月免費推播額度（200 則）已用完。",
+                401: "Token 無效或過期（請由 Messaging API 分頁重新 Issue）",
+                400: "user_id 錯誤或尚未加官方帳號好友",
+                429: "本月免費額度已用完",
             }
-            hint = hints.get(exc.code, detail)
-            return False, f"line：HTTP {exc.code} 失敗（{hint}）"
+            return False, f"HTTP {exc.code}（{hints.get(exc.code, exc.reason)}）"
 
-    def send(self, title: str, message: str) -> list[tuple[str, bool, str]]:
+    def send_iter(self, title: str, message: str) -> Iterator[tuple[str, bool, str]]:
+        """逐一發送並即時 yield 每個管道的結果 (provider_label, ok, detail)。"""
         active = self.enabled_providers
         if not active:
-            return [("none", False, "所有推播管道目前皆為關閉狀態（可在 manager_config.json 的 notifications 區塊開啟）。")]
+            yield ("系統", False, "所有推播管道皆為關閉狀態")
+            return
 
-        results: list[tuple[str, bool, str]] = []
-        dispatch = {
+        dispatch: dict[str, Callable[[dict[str, Any], str, str], tuple[bool, str]]] = {
             "ntfy": self._send_ntfy,
             "discord": self._send_discord,
             "telegram": self._send_telegram,
             "line": self._send_line,
         }
         for name in active:
+            label = PROVIDER_LABELS.get(name, name)
             cfg = self.settings.get(name, {})
             try:
-                ok, msg = dispatch[name](cfg, title, message)
-                results.append((name, ok, msg))
+                ok, detail = dispatch[name](cfg, title, message)
+                yield (label, ok, detail)
             except Exception as exc:
-                results.append((name, False, f"{name}：發送失敗 ({exc})"))
-        return results
+                yield (label, False, str(exc))
+
+    def send(self, title: str, message: str) -> list[tuple[str, bool, str]]:
+        return list(self.send_iter(title, message))

@@ -29,7 +29,7 @@ ANIGAMER_REF_URL = "https://ani.gamer.com.tw/animeRef.php?sn={ref_sn}"
 BANGUMI_V0_SEARCH_URL = "https://api.bgm.tv/v0/search/subjects"
 BANGUMI_LEGACY_SEARCH_URL = "https://api.bgm.tv/search/subject/{keyword}?type=2&responseGroup=small"
 BANGUMI_SUBJECT_URL = "https://api.bgm.tv/v0/subjects/{subject_id}"
-BANGUMI_UA = "aniGamerPlus-Manager/1.5.0 (personal-watchlist-tool)"
+BANGUMI_UA = "aniGamerPlus-Manager/1.5.1 (personal-watchlist-tool)"
 
 WEEKDAY_NAMES = ["週一", "週二", "週三", "週四", "週五", "週六", "週日"]
 

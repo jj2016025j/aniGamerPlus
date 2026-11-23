@@ -1,4 +1,4 @@
-<h1 align="center">aniGamerPlus Modular Manager (v1.5.0)</h1>
+<h1 align="center">aniGamerPlus Modular Manager (v1.5.1)</h1>
 
 <p align="center">
   基於 <a href="https://github.com/miyouzi/aniGamerPlus">miyouzi/aniGamerPlus</a> 的外掛式模組化增量下載與追番管理工具
@@ -104,7 +104,7 @@ pip install rich
 
 ## 四管道手機推播設定
 
-編輯 `manager_config.json` 的 `notifications` 區塊，四個管道各自獨立開關，可任意同時啟用多個。設定完成後在主選單按 **`8`** 即可發送一份真實的「目前追番進度簡報」驗證推播：
+編輯 `manager_config.json` 的 `notifications` 區塊，四個管道各自獨立開關，可任意同時啟用多個。設定完成後在主選單按 **`6`** 即可發送一份真實的「目前追番進度簡報」驗證推播：
 
 * **ntfy（免註冊最簡單）**：手機裝免費 App `ntfy` 訂閱自訂隨機頻道，填入 `"endpoint": "https://ntfy.sh/你的隨機頻道名"`。
 * **Discord**：在私人伺服器頻道建立 Webhook，填入 `"webhook_url"`。
