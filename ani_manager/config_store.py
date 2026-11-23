@@ -1,4 +1,4 @@
-"""系統偏好與推播金鑰設定模組（manager_config.json，支援範本初始化與自動剝離舊版 watchlist）。"""
+"""系統偏好、排序設定與推播金鑰模組（manager_config.json）。"""
 
 from __future__ import annotations
 
@@ -20,6 +20,19 @@ WEEKDAY_MAP = {
 }
 HHMM_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
 
+# 追番清單排序選項：(sort_key, 中文名稱, 預設是否降冪)
+WATCHLIST_SORT_OPTIONS: list[tuple[str, str, bool]] = [
+    ("added_at", "加入順序", False),
+    ("tracking", "追蹤優先", True),
+    ("missing", "待下載集數", True),
+    ("latest_upload", "最新上架 / 完結時間", True),
+    ("total_episodes", "總集數", True),
+    ("popularity", "熱門程度（觀看數）", True),
+    ("name", "作品名稱", False),
+]
+VALID_SORT_KEYS = {k for k, _, _ in WATCHLIST_SORT_OPTIONS}
+SORT_LABELS = {k: label for k, label, _ in WATCHLIST_SORT_OPTIONS}
+
 
 def default_notifications() -> dict[str, Any]:
     """支援四種推播管道獨立開關（ntfy / Discord / Telegram / LINE）。"""
@@ -36,12 +49,14 @@ class ManagerConfig:
     anigamer_dir: str = ""
     bangumi_dir: str = "bangumi"
     watchlist_file: str = "watchlist.json"
+    watchlist_sort_by: str = "added_at"
+    watchlist_sort_desc: bool = False
     default_resolution: str = "1080"
     cooldown_seconds: int = 10
     dedup_mode: str = "file_only"  # "file_only" | "file_and_history"
     upgrade_lower_resolution: bool = False
     check_on_startup: bool = True
-    clear_screen_on_menu: bool = True
+    clear_screen_on_menu: bool = False
     auto_check_audio: bool = True
     auto_fix_audio: bool = False
     notifications: dict[str, Any] = field(default_factory=default_notifications)
@@ -52,7 +67,7 @@ def default_config() -> ManagerConfig:
 
 
 def extract_sn_from_input(raw_input: str) -> str | None:
-    """從純 SN 或動畫瘋網址抽出 SN；若明顯太短（少於 4 碼）回傳 None 防止誤輸入。"""
+    """從純 SN 或動畫瘋網址抽出 SN；少於 4 碼回傳 None 防止誤輸入。"""
     text = raw_input.strip()
     if text.isdigit():
         return text if len(text) >= 4 else None
@@ -90,7 +105,7 @@ def validate_hhmm(raw: str) -> str | None:
 
 
 def parse_multi_targets(raw: str) -> list[str]:
-    """支援單選（如 3）或多選（如 5,6 或 5 6）。"""
+    """支援單筆（如 3）或多筆（如 5,6 或 5 6）。"""
     return [tok.strip() for tok in re.split(r"[,，\s]+", raw.strip()) if tok.strip()]
 
 
@@ -126,11 +141,7 @@ def _migrate_notifications(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
 
 
 class ConfigStore:
-    """
-    讀寫純淨設定檔 manager_config.json（僅保存系統偏好與推播金鑰）。
-    - 首次啟動無 manager_config.json 時，優先由 manager_config-sample.json 初始化。
-    - 若偵測舊版 manager_config.json 仍夾帶 watchlist，會取出交由 WatchlistStore 遷移並清除舊欄位。
-    """
+    """讀寫純淨設定檔 manager_config.json（僅保存系統偏好、排序規則與推播金鑰）。"""
 
     def __init__(self, config_path: Path, sample_path: Path | None = None) -> None:
         self.config_path = config_path
@@ -174,25 +185,36 @@ class ConfigStore:
             dedup_mode = "file_only"
             needs_save = True
 
+        sort_by = str(raw.get("watchlist_sort_by", "added_at"))
+        if sort_by not in VALID_SORT_KEYS:
+            sort_by = "added_at"
+            needs_save = True
+
         notifications, notif_save = _migrate_notifications(raw)
-        if (
-            notif_save
-            or "check_on_startup" not in raw
-            or "clear_screen_on_menu" not in raw
-            or "watchlist_file" not in raw
+        for required_key in (
+            "check_on_startup",
+            "clear_screen_on_menu",
+            "watchlist_file",
+            "watchlist_sort_by",
+            "watchlist_sort_desc",
         ):
+            if required_key not in raw:
+                needs_save = True
+        if notif_save:
             needs_save = True
 
         cfg = ManagerConfig(
             anigamer_dir=str(raw.get("anigamer_dir", "")),
             bangumi_dir=str(raw.get("bangumi_dir", "bangumi")),
             watchlist_file=str(raw.get("watchlist_file", "watchlist.json") or "watchlist.json"),
+            watchlist_sort_by=sort_by,
+            watchlist_sort_desc=bool(raw.get("watchlist_sort_desc", False)),
             default_resolution=validate_resolution(str(raw.get("default_resolution", "1080"))) or "1080",
             cooldown_seconds=int(raw.get("cooldown_seconds", 10)),
             dedup_mode=dedup_mode,
             upgrade_lower_resolution=bool(raw.get("upgrade_lower_resolution", False)),
             check_on_startup=bool(raw.get("check_on_startup", True)),
-            clear_screen_on_menu=bool(raw.get("clear_screen_on_menu", True)),
+            clear_screen_on_menu=bool(raw.get("clear_screen_on_menu", False)),
             auto_check_audio=bool(raw.get("auto_check_audio", True)),
             auto_fix_audio=bool(raw.get("auto_fix_audio", False)),
             notifications=notifications,

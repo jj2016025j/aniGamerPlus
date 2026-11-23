@@ -209,3 +209,42 @@ def fetch_episode_upload_time(sn: str, cookie_path: Path | None = None) -> datet
         return parse_upload_datetime_from_html(page_html)
     except Exception:
         return None
+
+
+def parse_views_from_html(page_html: str) -> int | None:
+    """從動畫瘋播放頁 HTML 解析觀看次數（例如 49.8萬 -> 498000、1610.7萬 -> 16107000）。"""
+    patterns = [
+        r'class=["\'][^"\']*newanime-count[^"\']*["\'][^>]*>.*?([\d,.]+)\s*(萬|億)?',
+        r'class=["\'][^"\']*anime_number[^"\']*["\'][^>]*>.*?([\d,.]+)\s*(萬|億)?',
+        r'觀看次數[：:\s]*([\d,.]+)\s*(萬|億)?',
+        r'<span[^>]*>\s*([\d,.]+)\s*(萬|億)\s*</span>',
+    ]
+    for pat in patterns:
+        m = re.search(pat, page_html, flags=re.IGNORECASE | re.DOTALL)
+        if not m:
+            continue
+        num_str = m.group(1).replace(",", "").strip()
+        unit = (m.group(2) or "").strip()
+        try:
+            val = float(num_str)
+            if unit == "億":
+                val *= 100_000_000
+            elif unit == "萬":
+                val *= 10_000
+            result = int(round(val))
+            if result > 0:
+                return result
+        except ValueError:
+            continue
+    return None
+
+
+def fetch_episode_page_info(sn: str, cookie_path: Path | None = None) -> tuple[datetime | None, int | None]:
+    """單次請求同時取得該集的上架時間與作品觀看次數（熱門度）。"""
+    try:
+        url = ANIGAMER_VIDEO_URL.format(sn=str(sn).strip())
+        cookie_header = load_cookie_header(cookie_path)
+        _, page_html = http_get_page(url, cookie_header=cookie_header, timeout=12)
+        return parse_upload_datetime_from_html(page_html), parse_views_from_html(page_html)
+    except Exception:
+        return None, None

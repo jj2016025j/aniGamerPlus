@@ -73,7 +73,7 @@ def format_check_digest(
     if new_entries:
         sections.append(f"摘要：{len(new_entries)} 部有新集數（共 {total_new_eps} 集可下載）")
     else:
-        sections.append("摘要：啟用中作品皆已追平，尚無新集數")
+        sections.append("摘要：追蹤中作品皆已下載，尚無新集數")
 
     if new_entries:
         block = [f"[待下載新集數] ({len(new_entries)} 部)"]
@@ -86,7 +86,7 @@ def format_check_digest(
         sections.append("\n".join(block))
 
     if up_to_date_entries:
-        block = [f"[已追平] ({len(up_to_date_entries)} 部)"]
+        block = [f"[已下載] ({len(up_to_date_entries)} 部)"]
         for idx, e in enumerate(up_to_date_entries, 1):
             meta_parts = [f"進度 {e.progress}"]
             if e.schedule:
@@ -96,7 +96,7 @@ def format_check_digest(
         sections.append("\n".join(block))
 
     if paused_names:
-        block = [f"[暫停追蹤] ({len(paused_names)} 部)"]
+        block = [f"[略過清單] ({len(paused_names)} 部)"]
         block.extend(f"• {name}" for name in paused_names)
         sections.append("\n".join(block))
 
@@ -206,7 +206,7 @@ class Notifier:
         req = urllib.request.Request(
             webhook,
             data=body,
-            headers={"Content-Type": "application/json", "User-Agent": "aniGamerPlus-Manager/1.5.1"},
+            headers={"Content-Type": "application/json", "User-Agent": "aniGamerPlus-Manager/1.6.0"},
             method="POST",
         )
         with urllib.request.urlopen(req, timeout=10):

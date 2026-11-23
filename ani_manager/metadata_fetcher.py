@@ -17,6 +17,7 @@ from .episode_fetcher import (
     EpisodeFetchError,
     EpisodeInfo,
     fetch_anime_episodes,
+    fetch_episode_page_info,
     fetch_episode_upload_time,
     http_get_page,
     load_cookie_header,
@@ -29,7 +30,7 @@ ANIGAMER_REF_URL = "https://ani.gamer.com.tw/animeRef.php?sn={ref_sn}"
 BANGUMI_V0_SEARCH_URL = "https://api.bgm.tv/v0/search/subjects"
 BANGUMI_LEGACY_SEARCH_URL = "https://api.bgm.tv/search/subject/{keyword}?type=2&responseGroup=small"
 BANGUMI_SUBJECT_URL = "https://api.bgm.tv/v0/subjects/{subject_id}"
-BANGUMI_UA = "aniGamerPlus-Manager/1.5.1 (personal-watchlist-tool)"
+BANGUMI_UA = "aniGamerPlus-Manager/1.6.0 (personal-watchlist-tool)"
 
 WEEKDAY_NAMES = ["週一", "週二", "週三", "週四", "週五", "週六", "週日"]
 
@@ -92,6 +93,7 @@ class EnrichedMetadata:
     schedule_note: str
     total_episodes: int | None
     latest_upload_at: str = ""
+    views: int | None = None
     schedule_source: str = ""
     total_source: str = ""
 
@@ -402,7 +404,7 @@ def enrich_anime_metadata(
     latest_sn = episodes[-1].sn if episodes else base_sn
     online_count = len(episodes)
 
-    latest_dt = fetch_episode_upload_time(latest_sn, cookie_path=cookie_path)
+    latest_dt, views = fetch_episode_page_info(latest_sn, cookie_path=cookie_path)
     homepage_sched = _schedule_cache.get_schedule_for_title(title, cookie_path=cookie_path)
 
     total_eps = None
@@ -431,6 +433,7 @@ def enrich_anime_metadata(
         schedule_note=schedule_note,
         total_episodes=total_eps,
         latest_upload_at=latest_dt.strftime("%Y/%m/%d %H:%M") if latest_dt else "",
+        views=views,
         schedule_source=sched_source,
         total_source=total_source,
     )

@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "items": [
     {
       "name": "學生會也有洞！",
@@ -9,7 +9,10 @@
       "total_episodes": 12,
       "online_episodes": null,
       "status": "連載中",
-      "enabled": true
+      "enabled": true,
+      "added_at": "",
+      "latest_upload_at": "",
+      "views": null
     }
   ]
 }
