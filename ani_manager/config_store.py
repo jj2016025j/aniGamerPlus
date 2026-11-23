@@ -1,9 +1,10 @@
-"""系統偏好、排序設定與推播金鑰模組（manager_config.json）。"""
+"""系統偏好、排序設定、背景模式、遠端驗證與推播金鑰模組（manager_config.json）。"""
 
 from __future__ import annotations
 
 import json
 import re
+import secrets
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -20,7 +21,6 @@ WEEKDAY_MAP = {
 }
 HHMM_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
 
-# 追番清單排序選項：(sort_key, 中文名稱, 預設是否降冪)
 WATCHLIST_SORT_OPTIONS: list[tuple[str, str, bool]] = [
     ("added_at", "加入順序", False),
     ("tracking", "追蹤優先", True),
@@ -44,6 +44,10 @@ def default_notifications() -> dict[str, Any]:
     }
 
 
+def generate_default_pin() -> str:
+    return f"{secrets.randbelow(9000) + 1000}"
+
+
 @dataclass
 class ManagerConfig:
     anigamer_dir: str = ""
@@ -59,6 +63,21 @@ class ManagerConfig:
     clear_screen_on_menu: bool = False
     auto_check_audio: bool = True
     auto_fix_audio: bool = False
+    # v2.0.0 Web / Desktop GUI / Background / Remote Security settings
+    web_host: str = "0.0.0.0"
+    web_port: int = 8765
+    background_mode: str = "manual"  # "manual" | "tray" | "scheduler"
+    tray_interval_minutes: int = 60
+    scheduler_times: list[str] = field(default_factory=lambda: ["02:00", "14:00"])
+    close_to_tray: bool = True
+    start_minimized: bool = False
+    remote_auth_enabled: bool = False
+    remote_pin: str = ""
+    remote_pin_version: int = 1
+    remote_auth_secret: str = field(default_factory=lambda: secrets.token_hex(24))
+    remote_webauthn_credentials: list[dict[str, Any]] = field(default_factory=list)
+    auto_transfer_remote_downloads: bool = False
+    delete_host_after_transfer: bool = False
     notifications: dict[str, Any] = field(default_factory=default_notifications)
 
 
@@ -67,7 +86,6 @@ def default_config() -> ManagerConfig:
 
 
 def extract_sn_from_input(raw_input: str) -> str | None:
-    """從純 SN 或動畫瘋網址抽出 SN；少於 4 碼回傳 None 防止誤輸入。"""
     text = raw_input.strip()
     if text.isdigit():
         return text if len(text) >= 4 else None
@@ -95,7 +113,6 @@ def validate_total_episodes(raw: str) -> tuple[bool, int | None, str]:
 
 
 def validate_hhmm(raw: str) -> str | None:
-    """將 1:00 / 01:00 / 0100 正規化為 HH:MM，無效時間回傳 None。"""
     text = raw.strip().replace("：", ":")
     if re.fullmatch(r"\d{4}", text):
         text = f"{text[:2]}:{text[2:]}"
@@ -105,7 +122,6 @@ def validate_hhmm(raw: str) -> str | None:
 
 
 def parse_multi_targets(raw: str) -> list[str]:
-    """支援單筆（如 3）或多筆（如 5,6 或 5 6）。"""
     return [tok.strip() for tok in re.split(r"[,，\s]+", raw.strip()) if tok.strip()]
 
 
@@ -141,7 +157,7 @@ def _migrate_notifications(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
 
 
 class ConfigStore:
-    """讀寫純淨設定檔 manager_config.json（僅保存系統偏好、排序規則與推播金鑰）。"""
+    """讀寫純淨設定檔 manager_config.json。"""
 
     def __init__(self, config_path: Path, sample_path: Path | None = None) -> None:
         self.config_path = config_path
@@ -190,6 +206,28 @@ class ConfigStore:
             sort_by = "added_at"
             needs_save = True
 
+        bg_mode = str(raw.get("background_mode", "manual"))
+        if bg_mode not in ("manual", "tray", "scheduler"):
+            bg_mode = "manual"
+            needs_save = True
+
+        raw_times = raw.get("scheduler_times")
+        if isinstance(raw_times, list):
+            valid_times = [t for item in raw_times if (t := validate_hhmm(str(item)))]
+            if not valid_times:
+                valid_times = ["02:00", "14:00"]
+        else:
+            valid_times = ["02:00", "14:00"]
+
+        auth_secret = str(raw.get("remote_auth_secret", "") or "")
+        if not auth_secret:
+            auth_secret = secrets.token_hex(24)
+            needs_save = True
+
+        creds = raw.get("remote_webauthn_credentials")
+        if not isinstance(creds, list):
+            creds = []
+
         notifications, notif_save = _migrate_notifications(raw)
         for required_key in (
             "check_on_startup",
@@ -197,6 +235,10 @@ class ConfigStore:
             "watchlist_file",
             "watchlist_sort_by",
             "watchlist_sort_desc",
+            "web_port",
+            "background_mode",
+            "remote_auth_enabled",
+            "remote_pin_version",
         ):
             if required_key not in raw:
                 needs_save = True
@@ -205,7 +247,7 @@ class ConfigStore:
 
         cfg = ManagerConfig(
             anigamer_dir=str(raw.get("anigamer_dir", "")),
-            bangumi_dir=str(raw.get("bangumi_dir", "bangumi")),
+            bangumi_dir=raw.get("bangumi_dir", "bangumi"),
             watchlist_file=str(raw.get("watchlist_file", "watchlist.json") or "watchlist.json"),
             watchlist_sort_by=sort_by,
             watchlist_sort_desc=bool(raw.get("watchlist_sort_desc", False)),
@@ -217,6 +259,20 @@ class ConfigStore:
             clear_screen_on_menu=bool(raw.get("clear_screen_on_menu", False)),
             auto_check_audio=bool(raw.get("auto_check_audio", True)),
             auto_fix_audio=bool(raw.get("auto_fix_audio", False)),
+            web_host=str(raw.get("web_host", "0.0.0.0") or "0.0.0.0"),
+            web_port=int(raw.get("web_port", 8765) or 8765),
+            background_mode=bg_mode,
+            tray_interval_minutes=max(10, int(raw.get("tray_interval_minutes", 60) or 60)),
+            scheduler_times=valid_times,
+            close_to_tray=bool(raw.get("close_to_tray", True)),
+            start_minimized=bool(raw.get("start_minimized", False)),
+            remote_auth_enabled=bool(raw.get("remote_auth_enabled", False)),
+            remote_pin=str(raw.get("remote_pin", "") or ""),
+            remote_pin_version=max(1, int(raw.get("remote_pin_version", 1) or 1)),
+            remote_auth_secret=auth_secret,
+            remote_webauthn_credentials=creds,
+            auto_transfer_remote_downloads=bool(raw.get("auto_transfer_remote_downloads", False)),
+            delete_host_after_transfer=bool(raw.get("delete_host_after_transfer", False)),
             notifications=notifications,
         )
         return cfg, needs_save

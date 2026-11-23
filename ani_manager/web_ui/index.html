@@ -1,0 +1,436 @@
+<!DOCTYPE html>
+<html lang="zh-Hant" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <title>AniManager — 動畫瘋增量下載管理器</title>
+  <link rel="icon" type="image/png" href="/icon.png" />
+  <link rel="apple-touch-icon" href="/icon.png" />
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <!-- Remote PIN / Biometric Lock Overlay -->
+  <div id="lockScreen" class="lock-overlay hidden">
+    <div class="lock-card">
+      <img src="/icon.png" alt="AniManager" class="lock-logo" />
+      <h2>遠端存取驗證</h2>
+      <p class="muted">此裝置為外部連線，請輸入主機設定的 PIN 碼解鎖</p>
+      <div class="lock-form">
+        <input type="password" id="lockPinInput" inputmode="numeric" maxlength="16" placeholder="輸入存取 PIN 碼" autocomplete="current-password" />
+        <label class="checkbox-row">
+          <input type="checkbox" id="lockRememberCheck" checked />
+          <span>記住此設備（變更密碼前免重複輸入）</span>
+        </label>
+        <button id="lockSubmitBtn" class="btn btn-primary btn-block">解鎖進入</button>
+        <button id="lockBiometricBtn" class="btn btn-secondary btn-block hidden">
+          <span>使用指紋 / Face ID / Windows Hello 解鎖</span>
+        </button>
+        <p id="lockErrorMsg" class="error-text"></p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Main App Layout -->
+  <div class="app-shell">
+    <!-- Desktop Sidebar -->
+    <aside class="sidebar">
+      <div class="brand">
+        <img src="/icon.png" alt="Icon" class="brand-icon" />
+        <div>
+          <div class="brand-title">AniManager</div>
+          <div class="brand-sub">v2.0.0 跨裝置版</div>
+        </div>
+      </div>
+
+      <nav class="nav-list">
+        <button class="nav-item active" data-view="dashboard">
+          <span class="nav-icon">◈</span><span>總覽與下載</span>
+        </button>
+        <button class="nav-item" data-view="watchlist">
+          <span class="nav-icon">▤</span><span>追番清單</span>
+        </button>
+        <button class="nav-item" data-view="files">
+          <span class="nav-icon">⇩</span><span>影片與傳送</span>
+        </button>
+        <button class="nav-item" data-view="auth">
+          <span class="nav-icon">✦</span><span>Cookie 與推播</span>
+        </button>
+        <button class="nav-item" data-view="settings">
+          <span class="nav-icon">⚙</span><span>系統設定</span>
+        </button>
+      </nav>
+
+      <div class="sidebar-footer">
+        <button id="themeToggleBtn" class="btn btn-ghost btn-sm btn-block">切換淺色 / 深色</button>
+      </div>
+    </aside>
+
+    <!-- Main Content Area -->
+    <main class="main-content">
+      <!-- Top Bar -->
+      <header class="topbar">
+        <div class="topbar-left">
+          <h1 id="pageTitle">總覽與下載</h1>
+          <span id="connBadge" class="badge badge-ok">本機連線</span>
+        </div>
+        <div class="topbar-actions">
+          <button id="btnQuickCheck" class="btn btn-secondary">僅檢查更新</button>
+          <button id="btnQuickDownload" class="btn btn-primary">檢查並下載</button>
+        </div>
+      </header>
+
+      <!-- Active Task Banner -->
+      <section id="taskBanner" class="task-banner hidden">
+        <div class="task-info">
+          <span class="spinner"></span>
+          <span id="taskLabel">正在執行任務...</span>
+        </div>
+        <div class="task-controls">
+          <span id="taskCounter" class="mono">0/0</span>
+          <button id="btnCancelTask" class="btn btn-danger btn-sm">安全中斷</button>
+        </div>
+      </section>
+
+      <!-- VIEW 1: DASHBOARD -->
+      <section id="view-dashboard" class="view active">
+        <div class="stats-grid">
+          <div class="stat-card">
+            <div class="stat-label">運行環境</div>
+            <div id="statEnv" class="stat-val">-</div>
+            <div id="statEnvSub" class="stat-sub">-</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">帳號 Cookie</div>
+            <div id="statCookie" class="stat-val">-</div>
+            <div id="statCookieSub" class="stat-sub">-</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">背景運作模式</div>
+            <div id="statBgMode" class="stat-val">-</div>
+            <div id="statBgSub" class="stat-sub">-</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">遠端存取保護</div>
+            <div id="statAuth" class="stat-val">-</div>
+            <div id="statAuthSub" class="stat-sub">-</div>
+          </div>
+        </div>
+
+        <div class="two-col">
+          <!-- Phone Connect QR Card -->
+          <div class="card">
+            <div class="card-header">
+              <h3>手機 / 跨裝置遙控連線</h3>
+              <button id="btnCopyRemoteUrl" class="btn btn-ghost btn-sm">複製網址</button>
+            </div>
+            <div class="qr-box">
+              <div id="qrCodeContainer" class="qr-svg"></div>
+              <div class="qr-details">
+                <div class="field-label">主要連線網址（同區網 Wi-Fi）</div>
+                <div id="remoteUrlText" class="mono url-pill">-</div>
+                <div id="tailscaleRow" class="hidden">
+                  <div class="field-label" style="margin-top:8px;">外網 Tailscale VPN 網址</div>
+                  <div id="tailscaleUrlText" class="mono url-pill">-</div>
+                </div>
+                <p class="muted small">手機掃碼即可加入主畫面當 App 使用；下載完成的影片可直接一鍵傳回手機。</p>
+              </div>
+            </div>
+          </div>
+
+          <!-- Active Watchlist Quick Progress -->
+          <div class="card">
+            <div class="card-header">
+              <h3>追蹤中作品快報</h3>
+              <button id="btnPushDigestDash" class="btn btn-secondary btn-sm">推播簡報</button>
+            </div>
+            <div id="dashWatchlist" class="mini-list"></div>
+          </div>
+        </div>
+
+        <!-- Live Console Log -->
+        <div class="card">
+          <div class="card-header">
+            <h3>即時執行紀錄</h3>
+            <span class="muted small">自動更新</span>
+          </div>
+          <div id="logBox" class="log-box"></div>
+        </div>
+      </section>
+
+      <!-- VIEW 2: WATCHLIST -->
+      <section id="view-watchlist" class="view">
+        <div class="toolbar">
+          <div class="toolbar-left">
+            <button id="btnOpenAddModal" class="btn btn-primary">+ 新增作品</button>
+            <button id="btnSyncAll" class="btn btn-secondary">同步全部資訊</button>
+          </div>
+          <div class="toolbar-right">
+            <select id="sortBySelect" class="select"></select>
+            <button id="btnToggleSortDir" class="btn btn-ghost" title="切換升降冪">↑</button>
+          </div>
+        </div>
+        <div id="watchlistContainer" class="cards-grid"></div>
+      </section>
+
+      <!-- VIEW 3: FILES & TRANSFER TO DEVICE -->
+      <section id="view-files" class="view">
+        <div class="card">
+          <div class="card-header">
+            <h3>遠端裝置自動傳送設定</h3>
+          </div>
+          <div class="form-row">
+            <label class="checkbox-row">
+              <input type="checkbox" id="chkAutoTransfer" />
+              <span>從手機／遠端瀏覽器發起下載後，完成時自動把影片下載到此裝置</span>
+            </label>
+            <label class="checkbox-row">
+              <input type="checkbox" id="chkDeleteAfterTransfer" />
+              <span>傳送至手機後自動刪除主機端副本（節省電腦硬碟空間）</span>
+            </label>
+            <button id="btnSaveTransferPrefs" class="btn btn-secondary btn-sm">儲存傳送設定</button>
+          </div>
+        </div>
+
+        <div class="toolbar">
+          <h3>本機已下載影片（點擊可直接傳送到目前裝置）</h3>
+          <div class="toolbar-left">
+            <button id="btnRepairAllAudio" class="btn btn-secondary btn-sm">修復 QuickTime 無聲</button>
+            <button id="btnRefreshFiles" class="btn btn-ghost btn-sm">重新整理</button>
+          </div>
+        </div>
+        <div id="filesListContainer" class="file-list"></div>
+      </section>
+
+      <!-- VIEW 4: COOKIE & NOTIFICATIONS -->
+      <section id="view-auth" class="view">
+        <div class="two-col">
+          <div class="card">
+            <div class="card-header">
+              <h3>巴哈姆特 Cookie 管理</h3>
+              <button id="btnCheckCookieOnline" class="btn btn-ghost btn-sm">線上驗證</button>
+            </div>
+            <p id="cookieDetailText" class="muted"></p>
+            <div class="btn-group">
+              <button id="btnCookieClipboard" class="btn btn-primary">從主機剪貼簿寫入</button>
+              <button id="btnCookiePlaywright" class="btn btn-secondary">彈出瀏覽器登入抓取</button>
+            </div>
+            <div class="divider"></div>
+            <label class="field-label">或直接貼上 Cookie 字串寫入（支援手機遠端貼上）</label>
+            <textarea id="cookieManualInput" rows="3" placeholder="貼上完整 Cookie 字串..."></textarea>
+            <button id="btnCookieManualSave" class="btn btn-secondary btn-sm" style="margin-top:8px;">寫入 Cookie</button>
+          </div>
+
+          <div class="card">
+            <div class="card-header">
+              <h3>四管道手機推播設定</h3>
+              <button id="btnTestNotify" class="btn btn-primary btn-sm">立即推播簡報</button>
+            </div>
+            <div class="notify-grid">
+              <div class="notify-item">
+                <label class="checkbox-row"><input type="checkbox" id="ntfyEnabled" /> <strong>ntfy</strong></label>
+                <input type="text" id="ntfyEndpoint" placeholder="https://ntfy.sh/你的隨機頻道" />
+              </div>
+              <div class="notify-item">
+                <label class="checkbox-row"><input type="checkbox" id="discordEnabled" /> <strong>Discord Webhook</strong></label>
+                <input type="text" id="discordWebhook" placeholder="https://discord.com/api/webhooks/..." />
+              </div>
+              <div class="notify-item">
+                <label class="checkbox-row"><input type="checkbox" id="tgEnabled" /> <strong>Telegram Bot</strong></label>
+                <div class="split-2">
+                  <input type="text" id="tgToken" placeholder="Bot Token" />
+                  <input type="text" id="tgChatId" placeholder="Chat ID" />
+                </div>
+              </div>
+              <div class="notify-item">
+                <label class="checkbox-row"><input type="checkbox" id="lineEnabled" /> <strong>LINE Messaging API</strong></label>
+                <div class="split-2">
+                  <input type="text" id="lineToken" placeholder="Channel access token" />
+                  <input type="text" id="lineUserId" placeholder="U開頭 Your user ID" />
+                </div>
+              </div>
+            </div>
+            <button id="btnSaveNotify" class="btn btn-primary" style="margin-top:12px;">儲存推播設定</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- VIEW 5: SETTINGS & BACKUP -->
+      <section id="view-settings" class="view">
+        <div class="two-col">
+          <!-- General & Background Mode -->
+          <div class="card">
+            <h3>下載偏好與背景自動運作</h3>
+            <div class="form-stack">
+              <div class="field">
+                <label class="field-label">預設目標畫質</label>
+                <select id="setDefaultRes" class="select">
+                  <option value="1080">1080P（非 VIP 自動降級 720P）</option>
+                  <option value="720">720P</option>
+                  <option value="540">540P</option>
+                  <option value="360">360P</option>
+                </select>
+              </div>
+              <div class="field">
+                <label class="field-label">去重模式</label>
+                <select id="setDedupMode" class="select">
+                  <option value="file_only">僅依實體檔（刪影片即重抓）</option>
+                  <option value="file_and_history">檔案 + 歷史 + DB（歸檔防重抓）</option>
+                </select>
+              </div>
+              <label class="checkbox-row">
+                <input type="checkbox" id="setUpgradeRes" />
+                <span>720P 自動升級 1080P（具 VIP 前置檢查與降級熔斷）</span>
+              </label>
+              <label class="checkbox-row">
+                <input type="checkbox" id="setCloseToTray" />
+                <span>關閉視窗時縮小至系統匣繼續運作（供手機隨時連線）</span>
+              </label>
+
+              <div class="divider"></div>
+              <div class="field">
+                <label class="field-label">背景自動更新模式</label>
+                <select id="setBgMode" class="select">
+                  <option value="manual">僅手動操作（關閉即結束）</option>
+                  <option value="tray">系統匣常駐定時輪詢</option>
+                  <option value="scheduler">系統原生排程（最省電、0常駐、休眠喚醒補跑）</option>
+                </select>
+              </div>
+              <div id="trayIntervalRow" class="field hidden">
+                <label class="field-label">系統匣自動檢查間隔（分鐘）</label>
+                <input type="number" id="setTrayMinutes" min="10" max="1440" value="60" />
+              </div>
+              <div id="schedulerTimesRow" class="field hidden">
+                <label class="field-label">每日系統排程時間（逗號分隔，24小時制）</label>
+                <input type="text" id="setSchedulerTimes" placeholder="02:00, 14:00" />
+                <div id="schedulerStatusText" class="muted small" style="margin-top:4px;"></div>
+              </div>
+              <button id="btnSaveGeneral" class="btn btn-primary">儲存偏好與背景設定</button>
+            </div>
+          </div>
+
+          <!-- Remote Security & Encrypted Backup -->
+          <div class="stack-col">
+            <div class="card">
+              <h3>外部瀏覽器安全鎖（手機 / 遠端存取）</h3>
+              <div class="form-stack">
+                <label class="checkbox-row">
+                  <input type="checkbox" id="setRemoteAuthEnabled" />
+                  <span>啟用外部瀏覽器 PIN 碼驗證（本機視窗免輸，外部連入首次需驗證）</span>
+                </label>
+                <div class="field">
+                  <label class="field-label">存取 PIN 碼（留空則自動產生 4 碼；修改後已記住設備需重驗證）</label>
+                  <input type="text" id="setRemotePin" placeholder="輸入自訂 PIN 碼" />
+                </div>
+                <div class="btn-group">
+                  <button id="btnSaveRemoteAuth" class="btn btn-primary btn-sm">套用安全設定</button>
+                  <button id="btnRevokeDevices" class="btn btn-secondary btn-sm">登出所有已記住設備</button>
+                  <button id="btnPreviewLock" class="btn btn-ghost btn-sm">預覽鎖定畫面</button>
+                </div>
+                <div class="divider"></div>
+                <div class="bio-row">
+                  <div>
+                    <strong>指紋 / Face ID / Windows Hello 快速解鎖</strong>
+                    <div id="bioStatusText" class="muted small">需透過 HTTPS（如 Tailscale）或本機環境啟用</div>
+                  </div>
+                  <button id="btnRegisterBiometric" class="btn btn-secondary btn-sm">綁定此裝置生物辨識</button>
+                </div>
+              </div>
+            </div>
+
+            <div class="card">
+              <h3>私密設定加密備份與還原 (.anibak)</h3>
+              <p class="muted small">單檔打包 manager_config.json、watchlist.json 與 cookie.txt，跨系統自動校正路徑。</p>
+              <div class="split-2">
+                <input type="password" id="backupPassword" placeholder="設定或輸入解密密碼（可留空）" />
+                <button id="btnExportBackup" class="btn btn-secondary">匯出並下載 .anibak</button>
+              </div>
+              <div class="split-2" style="margin-top:10px;">
+                <input type="file" id="backupFileInput" accept=".anibak" />
+                <select id="backupImportMode" class="select">
+                  <option value="full">完整覆蓋還原（自動留本機快照）</option>
+                  <option value="merge_watchlist">僅合併追番清單</option>
+                </select>
+              </div>
+              <button id="btnImportBackup" class="btn btn-primary btn-sm" style="margin-top:10px;">匯入還原備份檔</button>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <!-- Mobile Bottom Tab Bar -->
+    <nav class="mobile-nav">
+      <button class="m-nav-item active" data-view="dashboard">總覽</button>
+      <button class="m-nav-item" data-view="watchlist">追番</button>
+      <button class="m-nav-item" data-view="files">影片</button>
+      <button class="m-nav-item" data-view="auth">推播</button>
+      <button class="m-nav-item" data-view="settings">設定</button>
+    </nav>
+  </div>
+
+  <!-- Add / Edit Anime Modal -->
+  <div id="animeModal" class="modal-overlay hidden">
+    <div class="modal-card">
+      <div class="card-header">
+        <h3 id="modalTitle">新增追番作品</h3>
+        <button id="btnCloseModal" class="btn btn-ghost btn-sm">✕</button>
+      </div>
+
+      <div id="searchStep">
+        <div class="split-search">
+          <input type="text" id="searchAnimeInput" placeholder="輸入片名關鍵字、動畫瘋網址或 SN..." />
+          <button id="btnDoSearch" class="btn btn-primary">搜尋 / 解析</button>
+        </div>
+        <div id="searchResultsList" class="search-results"></div>
+      </div>
+
+      <div id="confirmStep" class="hidden">
+        <div class="preview-box">
+          <div class="field">
+            <label class="field-label">作品名稱</label>
+            <input type="text" id="editName" />
+          </div>
+          <div class="split-2">
+            <div class="field">
+              <label class="field-label">基準 SN</label>
+              <input type="text" id="editSn" readonly />
+            </div>
+            <div class="field">
+              <label class="field-label">目標畫質</label>
+              <select id="editRes" class="select">
+                <option value="1080">1080P</option>
+                <option value="720">720P</option>
+                <option value="540">540P</option>
+                <option value="360">360P</option>
+              </select>
+            </div>
+          </div>
+          <div class="split-2">
+            <div class="field">
+              <label class="field-label">預計總集數（可留空）</label>
+              <input type="number" id="editTotal" min="1" max="2000" />
+            </div>
+            <div class="field">
+              <label class="field-label">狀態 / 更新時間</label>
+              <input type="text" id="editSchedule" placeholder="例如：每週日 01:00 或 已完結" />
+            </div>
+          </div>
+          <label id="notifyNewRow" class="checkbox-row" style="margin-top:8px;">
+            <input type="checkbox" id="chkNotifyNewAnime" />
+            <span>新增後推播通知到手機</span>
+          </label>
+        </div>
+        <div class="btn-group" style="margin-top:14px; justify-content:flex-end;">
+          <button id="btnBackToSearch" class="btn btn-ghost">上一步</button>
+          <button id="btnSaveAnimeModal" class="btn btn-primary">儲存作品</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+  <script src="/app.js"></script>
+</body>
+</html>

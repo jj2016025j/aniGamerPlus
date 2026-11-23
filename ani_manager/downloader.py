@@ -150,6 +150,15 @@ class AniGamerDownloader:
 
     def __init__(self, env: EnvironmentInfo) -> None:
         self.env = env
+        self._active_proc: subprocess.Popen | None = None
+        self._abort_flag = False
+
+    def request_abort(self) -> None:
+        """供 Web / GUI 介面立即終止目前正在執行的子行程群組。"""
+        self._abort_flag = True
+        proc = self._active_proc
+        if proc is not None:
+            _terminate_process_tree(proc)
 
     def _ensure_script(self) -> None:
         if not self.env.anigamer_script:
@@ -160,14 +169,17 @@ class AniGamerDownloader:
 
     def build_command(self, sn: str, mode: str = "single", resolution: str | None = None) -> list[str]:
         self._ensure_script()
-        cmd = [
-            str(self.env.python_executable),
-            str(self.env.anigamer_script),
-            "-s",
-            str(sn),
-            "-m",
-            mode,
-        ]
+        if self.env.anigamer_is_exe:
+            cmd = [str(self.env.anigamer_script), "-s", str(sn), "-m", mode]
+        else:
+            cmd = [
+                str(self.env.python_executable),
+                str(self.env.anigamer_script),
+                "-s",
+                str(sn),
+                "-m",
+                mode,
+            ]
         if resolution:
             clean_res = str(resolution).upper().replace("P", "")
             if clean_res.isdigit():
@@ -186,16 +198,23 @@ class AniGamerDownloader:
         else:
             popen_kwargs["start_new_session"] = True
 
+        self._abort_flag = False
         proc = subprocess.Popen(cmd, **popen_kwargs)
+        self._active_proc = proc
         try:
             while True:
+                if self._abort_flag:
+                    _terminate_process_tree(proc)
+                    return -2, True
                 rc = proc.poll()
                 if rc is not None:
-                    return rc, False
+                    return rc, self._abort_flag
                 time.sleep(0.15)
         except KeyboardInterrupt:
             _terminate_process_tree(proc)
             return -2, True
+        finally:
+            self._active_proc = None
 
     def download_episode(self, episode: EpisodeInfo, resolution: str | None = None) -> DownloadResult:
         """下載單一集數（-m single），若中途遭手動中斷則自動清理 temp/ 殘檔。"""
