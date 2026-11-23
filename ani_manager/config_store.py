@@ -78,6 +78,7 @@ class ManagerConfig:
     remote_webauthn_credentials: list[dict[str, Any]] = field(default_factory=list)
     auto_transfer_remote_downloads: bool = False
     delete_host_after_transfer: bool = False
+    core_update_policy: str = "latest"  # "latest" | "pinned"
     notifications: dict[str, Any] = field(default_factory=default_notifications)
 
 
@@ -206,6 +207,11 @@ class ConfigStore:
             sort_by = "added_at"
             needs_save = True
 
+        core_policy = str(raw.get("core_update_policy", "latest"))
+        if core_policy not in ("latest", "pinned"):
+            core_policy = "latest"
+            needs_save = True
+
         bg_mode = str(raw.get("background_mode", "manual"))
         if bg_mode not in ("manual", "tray", "scheduler"):
             bg_mode = "manual"
@@ -273,6 +279,7 @@ class ConfigStore:
             remote_webauthn_credentials=creds,
             auto_transfer_remote_downloads=bool(raw.get("auto_transfer_remote_downloads", False)),
             delete_host_after_transfer=bool(raw.get("delete_host_after_transfer", False)),
+            core_update_policy=core_policy,
             notifications=notifications,
         )
         return cfg, needs_save

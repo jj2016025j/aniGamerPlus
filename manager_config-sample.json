@@ -31,5 +31,19 @@
       "channel_access_token": "",
       "user_id": ""
     }
-  }
+  },
+  "web_host": "0.0.0.0",
+  "web_port": 8765,
+  "background_mode": "manual",
+  "tray_interval_minutes": 60,
+  "scheduler_times": [
+    "02:00",
+    "14:00"
+  ],
+  "close_to_tray": true,
+  "remote_auth_enabled": false,
+  "remote_pin": "",
+  "auto_transfer_remote_downloads": false,
+  "delete_host_after_transfer": false,
+  "core_update_policy": "latest"
 }

@@ -1,4 +1,4 @@
-# AniManager v2.0.0 封裝成獨立執行檔（.exe / .app）操作手冊
+# AniManager v2.0.1 封裝成獨立執行檔（.exe / .app）操作手冊
 
 本文件說明如何將 **AniManager** 封裝成免裝 Python、一般使用者雙擊即可開啟的獨立桌面軟體（Windows `.exe` 與 macOS `.app`）。
 
@@ -58,10 +58,10 @@
 
 ### 操作步驟
 
-1. **將 `v2.0.0`（含 `.github/workflows/release.yml`）推送到 GitHub**
+1. **將 `v2.0.1`（含 `.github/workflows/release.yml`）推送到 GitHub**
    * 在 GitHub Desktop 完成 Commit 並按 **`Push origin`**。
 2. **建立版本標籤（Tag）觸發自動編譯**
-   * **方式 A（GitHub Desktop）**：切換到 `History` 分頁 → 對最新一筆 Commit **按右鍵 → `Create Tag...`** → 輸入 `v2.0.0`（**必須以小寫 `v` 開頭**）→ 點 `Create Tag` → 按上方 **`Push origin`**。
+   * **方式 A（GitHub Desktop）**：切換到 `History` 分頁 → 對最新一筆 Commit **按右鍵 → `Create Tag...`** → 輸入 `v2.0.1`（**必須以小寫 `v` 開頭**）→ 點 `Create Tag` → 按上方 **`Push origin`**。
    * **方式 B（GitHub 網頁版手動觸發測試）**：打開你的 GitHub 倉庫網頁 → 點上方 **`Actions`** 分頁 → 左側選 **`Build & Release AniManager (Windows & macOS)`** → 點右側 **`Run workflow`**。
 3. **下載編譯好的執行檔**
    * 觸發後約 3～5 分鐘，Actions 亮起綠色勾勾：

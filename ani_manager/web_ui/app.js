@@ -1,12 +1,15 @@
-/* AniManager v2.0.0 Frontend Controller */
+/* AniManager v2.0.1 Frontend Controller */
 const state = {
   data: null,
   deviceToken: localStorage.getItem("anm_device_token") || "",
   transferToken: Math.random().toString(36).slice(2, 10),
   triggeredDownloadIds: new Set(),
-  lastChallenge: "",
   activeView: "dashboard",
   previewLock: false,
+  qrMode: "auto", // "auto" | "tailscale" | "lan"
+  lastQrUrl: "",
+  searchCandidates: [],
+  filesList: [],
 };
 
 const VIEW_TITLES = {
@@ -25,6 +28,56 @@ function showToast(msg) {
   el._timer = setTimeout(() => el.classList.add("hidden"), 3200);
 }
 
+/* Custom Async Confirm Modal (works in macOS PyWebView where window.confirm is blocked) */
+function askConfirm(title, message) {
+  return new Promise((resolve) => {
+    const modal = document.getElementById("confirmModal");
+    document.getElementById("confirmTitle").textContent = title;
+    document.getElementById("confirmMessage").textContent = message;
+    modal.classList.remove("hidden");
+
+    const okBtn = document.getElementById("btnConfirmOk");
+    const cancelBtn = document.getElementById("btnConfirmCancel");
+    const cleanup = (ans) => {
+      modal.classList.add("hidden");
+      okBtn.onclick = null;
+      cancelBtn.onclick = null;
+      resolve(ans);
+    };
+    okBtn.onclick = () => cleanup(true);
+    cancelBtn.onclick = () => cleanup(false);
+  });
+}
+
+/* HTTP-safe Clipboard Copy (works on phone HTTP pages & macOS PyWebView) */
+async function copyTextSafe(text, label = "網址") {
+  if (!text || text === "-" || text.includes("未偵測")) {
+    showToast(`目前沒有可複製的${label}`);
+    return;
+  }
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+      showToast(`已複製${label}`);
+      return;
+    }
+  } catch (e) {}
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    document.execCommand("copy");
+    ta.remove();
+    showToast(`已複製${label}`);
+  } catch (e) {
+    showToast("複製失敗，請手動選取網址複製");
+  }
+}
+
 async function api(url, method = "GET", body = null) {
   const headers = { "Content-Type": "application/json" };
   if (state.deviceToken) headers["X-Device-Token"] = state.deviceToken;
@@ -41,34 +94,33 @@ async function api(url, method = "GET", body = null) {
   return { status: res.status, data };
 }
 
-/* Lightweight Deterministic Visual Matrix / QR-style SVG (offline safe) */
-function renderOfflineQrSvg(text) {
-  if (!text) return "";
-  const size = 25;
-  let hash = 2166136261;
-  for (let i = 0; i < text.length; i++) {
-    hash ^= text.charCodeAt(i);
-    hash = Math.imul(hash, 16777619);
+/* Render Real ISO/IEC 18004 Scannable QR Code from Backend SVG */
+function updateQrDisplay(network) {
+  const tsActive = Boolean(network && network.tailscale_active && network.tailscale_url);
+  const lanUrl = (network && network.lan_url) || "";
+  const tsUrl = (network && network.tailscale_url) || "";
+
+  let mode = state.qrMode;
+  if (mode === "auto") {
+    mode = tsActive ? "tailscale" : "lan";
+  } else if (mode === "tailscale" && !tsActive && lanUrl) {
+    mode = "lan";
   }
-  const cells = [];
-  const isFinder = (r, c) =>
-    (r < 7 && c < 7) || (r < 7 && c >= size - 7) || (r >= size - 7 && c < 7);
-  for (let r = 0; r < size; r++) {
-    for (let c = 0; c < size; c++) {
-      let dark = false;
-      if (isFinder(r, c)) {
-        const rr = r >= size - 7 ? r - (size - 7) : r;
-        const cc = c >= size - 7 ? c - (size - 7) : c;
-        dark = rr === 0 || rr === 6 || cc === 0 || cc === 6 || (rr >= 2 && rr <= 4 && cc >= 2 && cc <= 4);
-      } else {
-        const idx = (r * size + c) % text.length;
-        const v = (text.charCodeAt(idx) + r * 17 + c * 31 + (hash >>> ((r + c) % 16))) & 7;
-        dark = v < 4;
-      }
-      if (dark) cells.push(`<rect x="${c}" y="${r}" width="1" height="1" fill="#0f172a"/>`);
-    }
+
+  const targetUrl = (mode === "tailscale" ? tsUrl : lanUrl) || network.primary_remote_url || network.local_url;
+
+  const btnTs = document.getElementById("btnQrTailscale");
+  const btnLan = document.getElementById("btnQrLan");
+  btnTs.classList.toggle("active-tab", mode === "tailscale" && tsActive);
+  btnLan.classList.toggle("active-tab", mode === "lan" || !tsActive);
+  btnTs.disabled = !tsActive;
+  btnLan.disabled = !lanUrl;
+
+  if (targetUrl && targetUrl !== state.lastQrUrl) {
+    state.lastQrUrl = targetUrl;
+    const qrBox = document.getElementById("qrCodeContainer");
+    qrBox.innerHTML = `<img src="/api/qr.svg?text=${encodeURIComponent(targetUrl)}" alt="QR Code" style="width:100%;height:100%;display:block;" />`;
   }
-  return `<svg viewBox="0 0 ${size} ${size}" width="102" height="102" xmlns="http://www.w3.org/2000/svg">${cells.join("")}</svg>`;
 }
 
 /* Lock Screen & WebAuthn Biometrics */
@@ -227,31 +279,39 @@ function renderState(d) {
   badge.textContent = d.auth.is_local ? "本機視窗" : "遠端設備連線";
   badge.className = "badge " + (d.auth.is_local ? "badge-ok" : "badge-warn");
 
+  const quitBtn = document.getElementById("btnQuitApp");
+  if (quitBtn) quitBtn.classList.toggle("hidden", !d.auth.is_local);
+
   // Stats
   document.getElementById("statEnv").textContent = d.env.os_name;
   document.getElementById("statEnvSub").textContent = `核心:${d.env.has_core ? "OK" : "缺"} ｜ FFmpeg:${d.env.has_ffmpeg ? "OK" : "未裝"}`;
   document.getElementById("statCookie").textContent = d.cookie.account;
   document.getElementById("statCookieSub").textContent = d.cookie.valid ? d.cookie.tier : "訪客模式";
 
-  const bgLabels = { manual: "僅手動操作", tray: `系統匣每 ${d.config.tray_interval_minutes} 分`, scheduler: "系統原生排程" };
+  const bgLabels = { manual: "僅手動操作", tray: `常駐每 ${d.config.tray_interval_minutes} 分`, scheduler: "系統原生排程" };
   document.getElementById("statBgMode").textContent = bgLabels[d.config.background_mode] || d.config.background_mode;
   document.getElementById("statBgSub").textContent = d.scheduler.installed ? d.scheduler.detail : `預設 ${d.config.default_resolution}P`;
 
   document.getElementById("statAuth").textContent = d.config.remote_auth_enabled ? "已上鎖 (PIN)" : "未上鎖";
   document.getElementById("statAuthSub").textContent = d.config.remote_auth_enabled
     ? `PIN: ${d.config.remote_pin} ｜ 生物辨識 ${d.auth.webauthn_count} 台`
-    : "區網免密碼直連";
+    : "區網 / Tailscale 直連";
 
-  // Remote URL & QR
-  const remoteUrl = d.network.primary_remote_url;
-  document.getElementById("remoteUrlText").textContent = remoteUrl;
-  document.getElementById("qrCodeContainer").innerHTML = renderOfflineQrSvg(remoteUrl);
-  if (d.network.tailscale_url) {
-    document.getElementById("tailscaleRow").classList.remove("hidden");
-    document.getElementById("tailscaleUrlText").textContent = d.network.tailscale_url;
+  // Dual LAN + Tailscale Network Card
+  const net = d.network || {};
+  const tsBadge = document.getElementById("tailscaleBadge");
+  if (net.tailscale_active) {
+    tsBadge.textContent = `Tailscale 已連線`;
+    tsBadge.className = "badge badge-ok";
+    document.getElementById("tailscaleUrlText").textContent = net.tailscale_url;
   } else {
-    document.getElementById("tailscaleRow").classList.add("hidden");
+    tsBadge.textContent = "Tailscale 未啟動";
+    tsBadge.className = "badge badge-muted";
+    document.getElementById("tailscaleUrlText").textContent = "未偵測到 Tailscale（開啟後按「刷新網路」）";
   }
+  document.getElementById("lanUrlText").textContent = net.lan_url || "未偵測到區網 IP";
+  document.getElementById("netCheckedText").textContent = `最近偵測：${net.checked_at || "-"}（${net.tailscale_source || ""}）｜切換上方按鈕可切換 QR Code。`;
+  updateQrDisplay(net);
 
   // Task Banner
   const banner = document.getElementById("taskBanner");
@@ -290,13 +350,10 @@ function renderState(d) {
     .join("");
   if (atBottom) logBox.scrollTop = logBox.scrollHeight;
 
-  // Watchlist Full Cards
   renderWatchlist(d);
-
-  // Sync Settings & Cookie inputs (only when user isn't actively typing inside them)
   syncFormValues(d);
 
-  // Auto-transfer newly finished remote downloads to this browser!
+  // Auto-transfer newly finished remote downloads
   if (!d.auth.is_local && Array.isArray(d.remote_ready_files)) {
     for (const f of d.remote_ready_files) {
       if (f.transfer_token === state.transferToken && !state.triggeredDownloadIds.has(f.id)) {
@@ -330,14 +387,10 @@ function renderWatchlist(d) {
   }
 
   container.innerHTML = d.watchlist
-    .map((w) => {
+    .map((w, idx) => {
       const ratio = `${w.online_episodes ?? "?"}/${w.total_episodes ?? "?"}`;
-      const statusBadge = w.enabled
-        ? `<span class="badge badge-ok">追蹤</span>`
-        : `<span class="badge badge-muted">略過</span>`;
-      const scanHint = w.scan && w.scan.missing_count > 0
-        ? `<span class="badge badge-warn">待下載 ${w.scan.missing_count} 集</span>`
-        : "";
+      const statusBadge = w.enabled ? `<span class="badge badge-ok">追蹤</span>` : `<span class="badge badge-muted">略過</span>`;
+      const scanHint = w.scan && w.scan.missing_count > 0 ? `<span class="badge badge-warn">待下載 ${w.scan.missing_count} 集</span>` : "";
       return `
       <div class="anime-card ${w.enabled ? "" : "paused"}">
         <div class="anime-top">
@@ -345,17 +398,17 @@ function renderWatchlist(d) {
           <div style="display:flex;gap:4px;flex-shrink:0;">${scanHint}${statusBadge}</div>
         </div>
         <div class="anime-meta">
-          <span>SN: ${w.sn}</span>
-          <span>畫質: ${w.resolution}P</span>
+          <span>SN: ${escapeHtml(w.sn)}</span>
+          <span>畫質: ${escapeHtml(w.resolution)}P</span>
           <span>進度: ${ratio}</span>
-          <span>熱門: ${w.views_formatted}</span>
+          <span>熱門: ${escapeHtml(w.views_formatted)}</span>
           <span>${escapeHtml(w.schedule_note || "無排程")}</span>
         </div>
         <div class="anime-actions">
-          <button class="btn btn-primary btn-sm" onclick="downloadSingleAnime('${w.sn}')">下載新集</button>
-          <button class="btn btn-secondary btn-sm" onclick="toggleAnime('${w.sn}')">${w.enabled ? "設為略過" : "開啟追蹤"}</button>
-          <button class="btn btn-ghost btn-sm" onclick="openEditAnime('${w.sn}')">編輯</button>
-          <button class="btn btn-danger btn-sm" onclick="deleteAnime('${w.sn}', '${escapeAttr(w.name)}')">刪除</button>
+          <button class="btn btn-primary btn-sm" data-act="dl" data-idx="${idx}">下載新集</button>
+          <button class="btn btn-secondary btn-sm" data-act="toggle" data-idx="${idx}">${w.enabled ? "設為略過" : "開啟追蹤"}</button>
+          <button class="btn btn-ghost btn-sm" data-act="edit" data-idx="${idx}">編輯</button>
+          <button class="btn btn-danger btn-sm" data-act="del" data-idx="${idx}">刪除</button>
         </div>
       </div>`;
     })
@@ -398,6 +451,7 @@ function syncFormValues(d) {
   document.getElementById("setBgMode").value = c.background_mode;
   document.getElementById("setTrayMinutes").value = c.tray_interval_minutes;
   document.getElementById("setSchedulerTimes").value = (c.scheduler_times || ["02:00", "14:00"]).join(", ");
+  document.getElementById("setCorePolicy").value = c.core_update_policy || "latest";
   updateBgModeFields(c.background_mode);
 
   document.getElementById("setRemoteAuthEnabled").checked = c.remote_auth_enabled;
@@ -422,7 +476,8 @@ async function toggleAnime(sn) {
 }
 
 async function deleteAnime(sn, name) {
-  if (!confirm(`確定要從追番清單移除《${name}》嗎？（不影響已下載影片）`)) return;
+  const ok = await askConfirm("刪除追番作品", `確定要從追番清單移除《${name}》嗎？（不會刪除硬碟上已下載的影片）`);
+  if (!ok) return;
   await api("/api/watchlist/delete", "POST", { sns: [sn] });
   showToast(`已刪除《${name}》`);
   await refreshState();
@@ -434,6 +489,7 @@ let pendingMeta = null;
 function openAddModal() {
   modalMode = "add";
   pendingMeta = null;
+  state.searchCandidates = [];
   document.getElementById("modalTitle").textContent = "新增追番作品";
   document.getElementById("searchStep").classList.remove("hidden");
   document.getElementById("confirmStep").classList.add("hidden");
@@ -486,25 +542,28 @@ async function doAnimeSearch() {
     populateConfirmStep(data.meta);
     return;
   }
-  if (!data.candidates.length) {
+  state.searchCandidates = data.candidates || [];
+  if (!state.searchCandidates.length) {
     listEl.innerHTML = `<div class="muted small">找不到相關作品</div>`;
     return;
   }
-  listEl.innerHTML = data.candidates
+  listEl.innerHTML = state.searchCandidates
     .map(
-      (c, i) => `
+      (c, idx) => `
       <div class="search-item">
         <div>
           <div><strong>${escapeHtml(c.title)}</strong></div>
           <div class="muted small">${escapeHtml(c.year_text || "")} ｜ ${escapeHtml(c.ep_count_text || "")}</div>
         </div>
-        <button class="btn btn-primary btn-sm" onclick='selectSearchCandidate(${JSON.stringify(c)})'>選擇</button>
+        <button class="btn btn-primary btn-sm" data-cand-idx="${idx}">選擇</button>
       </div>`
     )
     .join("");
 }
 
-async function selectSearchCandidate(cand) {
+async function selectSearchCandidateByIndex(idx) {
+  const cand = state.searchCandidates[idx];
+  if (!cand) return;
   const listEl = document.getElementById("searchResultsList");
   listEl.innerHTML = `<div class="muted small">正在擷取《${escapeHtml(cand.title)}》基準 SN 與週表...</div>`;
   const { data } = await api("/api/watchlist/resolve-candidate", "POST", cand);
@@ -551,49 +610,34 @@ async function saveAnimeModal() {
 /* Files & Transfer */
 async function loadFiles() {
   const { data } = await api("/api/files/list");
+  state.filesList = (data.ok && data.files) ? data.files : [];
   const container = document.getElementById("filesListContainer");
-  if (!data.ok || !data.files.length) {
+  if (!state.filesList.length) {
     container.innerHTML = `<div class="card muted">目前下載資料夾尚無影片檔</div>`;
     return;
   }
-  container.innerHTML = data.files
-    .map((f) => {
+  container.innerHTML = state.filesList
+    .map((f, idx) => {
       const mb = (f.size_bytes / (1024 * 1024)).toFixed(1) + " MB";
       const dlHref = `/api/files/download?path=${encodeURIComponent(f.rel_path)}`;
       return `
       <div class="file-row">
         <div>
           <div class="file-name">${escapeHtml(f.name)}</div>
-          <div class="muted small">${escapeHtml(f.series)} ｜ ${f.resolution} ｜ ${mb} ｜ ${f.modified_at}</div>
+          <div class="muted small">${escapeHtml(f.series)} ｜ ${escapeHtml(f.resolution)} ｜ ${mb} ｜ ${escapeHtml(f.modified_at)}</div>
         </div>
         <div class="btn-group">
-          <a href="${dlHref}" download="${escapeAttr(f.name)}" class="btn btn-primary btn-sm" style="text-decoration:none;">下載到此裝置</a>
-          <button class="btn btn-ghost btn-sm" onclick="repairSingleFile('${escapeAttr(f.rel_path)}')">修音軌</button>
-          <button class="btn btn-danger btn-sm" onclick="deleteLocalFile('${escapeAttr(f.rel_path)}', '${escapeAttr(f.name)}')">刪除</button>
+          <a href="${dlHref}" download="${escapeHtml(f.name)}" class="btn btn-primary btn-sm" style="text-decoration:none;">下載到此裝置</a>
+          <button class="btn btn-ghost btn-sm" data-file-act="repair" data-file-idx="${idx}">修音軌</button>
+          <button class="btn btn-danger btn-sm" data-file-act="del" data-file-idx="${idx}">刪除</button>
         </div>
       </div>`;
     })
     .join("");
 }
 
-async function repairSingleFile(relPath) {
-  showToast("正在修復音軌...");
-  const { data } = await api("/api/files/repair-audio", "POST", { rel_path: relPath });
-  showToast(data.ok ? "音軌修復完成" : data.message || "修復失敗");
-}
-
-async function deleteLocalFile(relPath, name) {
-  if (!confirm(`確定刪除本機檔案《${name}》？`)) return;
-  await api("/api/files/delete", "POST", { rel_path: relPath });
-  showToast("已刪除");
-  await loadFiles();
-}
-
 function escapeHtml(str) {
   return String(str || "").replace(/[&<>"']/g, (m) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[m]));
-}
-function escapeAttr(str) {
-  return String(str || "").replace(/'/g, "\\'").replace(/"/g, "&quot;");
 }
 
 async function refreshState() {
@@ -603,9 +647,8 @@ async function refreshState() {
   } catch (e) {}
 }
 
-/* Bind Events */
+/* Bind All Events via Clean Event Delegation */
 document.addEventListener("DOMContentLoaded", () => {
-  // Theme restore
   const savedTheme = localStorage.getItem("anm_theme") || "dark";
   document.documentElement.setAttribute("data-theme", savedTheme);
   document.getElementById("themeToggleBtn").addEventListener("click", () => {
@@ -615,9 +658,53 @@ document.addEventListener("DOMContentLoaded", () => {
     localStorage.setItem("anm_theme", next);
   });
 
-  // Nav buttons
+  document.getElementById("btnQuitApp").addEventListener("click", async () => {
+    const ok = await askConfirm("完全結束 AniManager", "結束後背景網頁引擎也會停止，手機將無法連線。確定要完全退出嗎？");
+    if (!ok) return;
+    await api("/api/system/quit", "POST", {});
+    showToast("正在關閉程式...");
+  });
+
   document.querySelectorAll(".nav-item, .m-nav-item").forEach((btn) => {
     btn.addEventListener("click", () => switchView(btn.dataset.view));
+  });
+
+  // Delegated clicks for watchlist cards
+  document.getElementById("watchlistContainer").addEventListener("click", (e) => {
+    const btn = e.target.closest("button[data-act]");
+    if (!btn || !state.data) return;
+    const w = state.data.watchlist[Number(btn.dataset.idx)];
+    if (!w) return;
+    if (btn.dataset.act === "dl") downloadSingleAnime(w.sn);
+    else if (btn.dataset.act === "toggle") toggleAnime(w.sn);
+    else if (btn.dataset.act === "edit") openEditAnime(w.sn);
+    else if (btn.dataset.act === "del") deleteAnime(w.sn, w.name);
+  });
+
+  // Delegated clicks for search results
+  document.getElementById("searchResultsList").addEventListener("click", (e) => {
+    const btn = e.target.closest("button[data-cand-idx]");
+    if (!btn) return;
+    selectSearchCandidateByIndex(Number(btn.dataset.candIdx));
+  });
+
+  // Delegated clicks for files list
+  document.getElementById("filesListContainer").addEventListener("click", async (e) => {
+    const btn = e.target.closest("button[data-file-act]");
+    if (!btn) return;
+    const f = state.filesList[Number(btn.dataset.fileIdx)];
+    if (!f) return;
+    if (btn.dataset.fileAct === "repair") {
+      showToast("正在修復音軌...");
+      const { data } = await api("/api/files/repair-audio", "POST", { rel_path: f.rel_path });
+      showToast(data.ok ? "音軌修復完成" : data.message || "修復失敗");
+    } else if (btn.dataset.fileAct === "del") {
+      const ok = await askConfirm("刪除本機影片", `確定要永久刪除《${f.name}》嗎？`);
+      if (!ok) return;
+      await api("/api/files/delete", "POST", { rel_path: f.rel_path });
+      showToast("已刪除");
+      await loadFiles();
+    }
   });
 
   // Topbar check / download / cancel
@@ -636,12 +723,35 @@ document.addEventListener("DOMContentLoaded", () => {
     showToast(data.message || "已送出中斷");
   });
 
-  // Copy URL & Push Digest
-  document.getElementById("btnCopyRemoteUrl").addEventListener("click", () => {
-    const txt = document.getElementById("remoteUrlText").textContent;
-    navigator.clipboard?.writeText(txt);
-    showToast("已複製連線網址");
+  // Network refresh, QR mode toggle, and copy URLs
+  document.getElementById("btnRefreshNetwork").addEventListener("click", async () => {
+    const { data } = await api("/api/network/refresh", "POST", {});
+    if (data.ok && data.network) {
+      state.lastQrUrl = "";
+      if (state.data) {
+        state.data.network = data.network;
+        renderState(state.data);
+      }
+      showToast(data.network.tailscale_active ? `已偵測到 Tailscale (${data.network.tailscale_ip})` : "已刷新網路（未偵測到 Tailscale）");
+    }
   });
+  document.getElementById("btnQrTailscale").addEventListener("click", () => {
+    state.qrMode = "tailscale";
+    state.lastQrUrl = "";
+    if (state.data) updateQrDisplay(state.data.network);
+  });
+  document.getElementById("btnQrLan").addEventListener("click", () => {
+    state.qrMode = "lan";
+    state.lastQrUrl = "";
+    if (state.data) updateQrDisplay(state.data.network);
+  });
+  document.getElementById("btnCopyTsUrl").addEventListener("click", () => {
+    copyTextSafe(document.getElementById("tailscaleUrlText").textContent, "Tailscale 網址");
+  });
+  document.getElementById("btnCopyLanUrl").addEventListener("click", () => {
+    copyTextSafe(document.getElementById("lanUrlText").textContent, "區網網址");
+  });
+
   document.getElementById("btnPushDigestDash").addEventListener("click", async () => {
     const { data } = await api("/api/notify/test", "POST", {});
     showToast(data.ok ? "已發送追番簡報" : data.error || "發送失敗");
@@ -731,8 +841,26 @@ document.addEventListener("DOMContentLoaded", () => {
     await refreshState();
   });
 
-  // Settings & Background Mode
+  // Settings, Background Mode & Core Updater
   document.getElementById("setBgMode").addEventListener("change", (e) => updateBgModeFields(e.target.value));
+  document.getElementById("btnCheckCore").addEventListener("click", async () => {
+    const statusEl = document.getElementById("coreStatusText");
+    statusEl.textContent = "查詢 GitHub 最新版中...";
+    const { data } = await api("/api/core/status");
+    if (data.ok && data.core) {
+      const c = data.core;
+      statusEl.textContent = c.error
+        ? `本機：${c.core_file} (${c.local_version}) ｜ ${c.error}`
+        : `本機：${c.core_file} (${c.local_version}) ｜ 官方最新：${c.latest_tag || "-"} ｜ FFmpeg：${c.has_ffmpeg ? "正常" : "未安裝"}`;
+      document.getElementById("btnUpdateCoreExe").classList.toggle("hidden", !c.can_auto_download_exe);
+    }
+  });
+  document.getElementById("btnUpdateCoreExe").addEventListener("click", async () => {
+    showToast("正在從官方 Release 下載最新 aniGamerPlus.exe...");
+    const { data } = await api("/api/core/update", "POST", {});
+    showToast(data.message || (data.ok ? "更新完成" : "更新失敗"));
+    await refreshState();
+  });
   document.getElementById("btnSaveGeneral").addEventListener("click", async () => {
     const times = document.getElementById("setSchedulerTimes").value.split(",").map((s) => s.trim()).filter(Boolean);
     const { data } = await api("/api/settings/update", "POST", {
@@ -743,6 +871,7 @@ document.addEventListener("DOMContentLoaded", () => {
       background_mode: document.getElementById("setBgMode").value,
       tray_interval_minutes: parseInt(document.getElementById("setTrayMinutes").value || "60", 10),
       scheduler_times: times,
+      core_update_policy: document.getElementById("setCorePolicy").value,
       apply_scheduler: true,
     });
     showToast(data.scheduler_message || "偏好與背景設定已儲存");

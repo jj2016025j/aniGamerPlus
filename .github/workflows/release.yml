@@ -1,0 +1,84 @@
+name: Build & Release AniManager (Windows & macOS)
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.os_label }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-latest
+            os_label: Windows-x64-AllInOne
+            asset_name: AniManager-Windows-x64.zip
+          - runner: macos-latest
+            os_label: macOS-AppleSilicon
+            asset_name: AniManager-macOS.zip
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install GUI & Packaging Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller pywebview pystray pillow rich cryptography
+
+      - name: Build All-in-One Package (Windows)
+        if: runner.os == 'Windows'
+        run: python build_app.py --bundle-core
+
+      - name: Build App Bundle (macOS)
+        if: runner.os == 'macOS'
+        run: python build_app.py
+
+      - name: Package Release Archive (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "dist/AniManager/*" -DestinationPath "${{ matrix.asset_name }}" -Force
+
+      - name: Package Release Archive (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          cd dist
+          ditto -c -k --sequesterRsrc --keepParent AniManager.app "../${{ matrix.asset_name }}"
+          cd ..
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.os_label }}
+          path: ${{ matrix.asset_name }}
+
+  publish-release:
+    name: Publish GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download All Built Archives
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create Release & Attach Binaries
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: artifacts/*.zip

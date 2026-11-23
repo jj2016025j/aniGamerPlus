@@ -1,4 +1,4 @@
-<h1 align="center">AniManager — 動畫瘋跨裝置增量下載管理器 (v2.0.0)</h1>
+<h1 align="center">AniManager — 動畫瘋跨裝置增量下載管理器 (v2.0.1)</h1>
 
 <p align="center">
   基於 <a href="https://github.com/miyouzi/aniGamerPlus">miyouzi/aniGamerPlus</a> 的模組化桌面視窗、手機遙控與增量追番管理系統
@@ -10,7 +10,7 @@
 
 ---
 
-## 核心功能亮點 (v2.0.0)
+## 核心功能亮點 (v2.0.1)
 
 * **一體化桌面視窗＋手機跨裝置遙控（`gui_app.py`、`web_server.py`、`web_ui/`）**
   * 雙擊啟動獨立桌面視窗（無終端黑窗），背後自動啟動內建 Web 引擎（預設連接埠 `8765`）。

@@ -40,7 +40,7 @@
         <img src="/icon.png" alt="Icon" class="brand-icon" />
         <div>
           <div class="brand-title">AniManager</div>
-          <div class="brand-sub">v2.0.0 跨裝置版</div>
+          <div class="brand-sub">v2.0.1 跨裝置版</div>
         </div>
       </div>
 
@@ -62,8 +62,9 @@
         </button>
       </nav>
 
-      <div class="sidebar-footer">
+      <div class="sidebar-footer" style="display:flex;flex-direction:column;gap:8px;">
         <button id="themeToggleBtn" class="btn btn-ghost btn-sm btn-block">切換淺色 / 深色</button>
+        <button id="btnQuitApp" class="btn btn-danger btn-sm btn-block">完全結束程式</button>
       </div>
     </aside>
 
@@ -119,22 +120,39 @@
         </div>
 
         <div class="two-col">
-          <!-- Phone Connect QR Card -->
+          <!-- Phone Connect QR Card (Dual LAN + Tailscale + Live Refresh) -->
           <div class="card">
             <div class="card-header">
-              <h3>手機 / 跨裝置遙控連線</h3>
-              <button id="btnCopyRemoteUrl" class="btn btn-ghost btn-sm">複製網址</button>
+              <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                <h3>手機 / 跨裝置連線</h3>
+                <span id="tailscaleBadge" class="badge badge-muted">Tailscale 偵測中</span>
+              </div>
+              <button id="btnRefreshNetwork" class="btn btn-ghost btn-sm">刷新網路</button>
             </div>
             <div class="qr-box">
-              <div id="qrCodeContainer" class="qr-svg"></div>
-              <div class="qr-details">
-                <div class="field-label">主要連線網址（同區網 Wi-Fi）</div>
-                <div id="remoteUrlText" class="mono url-pill">-</div>
-                <div id="tailscaleRow" class="hidden">
-                  <div class="field-label" style="margin-top:8px;">外網 Tailscale VPN 網址</div>
-                  <div id="tailscaleUrlText" class="mono url-pill">-</div>
+              <div class="qr-col">
+                <div id="qrCodeContainer" class="qr-svg"></div>
+                <div class="qr-tabs">
+                  <button id="btnQrTailscale" class="btn btn-ghost btn-xs">Tailscale</button>
+                  <button id="btnQrLan" class="btn btn-ghost btn-xs">區網 Wi-Fi</button>
                 </div>
-                <p class="muted small">手機掃碼即可加入主畫面當 App 使用；下載完成的影片可直接一鍵傳回手機。</p>
+              </div>
+              <div class="qr-details" style="flex:1;min-width:0;">
+                <div class="url-block">
+                  <div class="url-row-head">
+                    <span class="field-label" style="margin:0;">Tailscale 跨網網址（4G / 外出）</span>
+                    <button id="btnCopyTsUrl" class="btn btn-ghost btn-xs">複製</button>
+                  </div>
+                  <div id="tailscaleUrlText" class="mono url-pill">未偵測到 Tailscale</div>
+                </div>
+                <div class="url-block" style="margin-top:10px;">
+                  <div class="url-row-head">
+                    <span class="field-label" style="margin:0;">區網 Wi-Fi 網址（同網路最快）</span>
+                    <button id="btnCopyLanUrl" class="btn btn-ghost btn-xs">複製</button>
+                  </div>
+                  <div id="lanUrlText" class="mono url-pill">-</div>
+                </div>
+                <p id="netCheckedText" class="muted small" style="margin-top:8px;">掃描左側標準 QR Code 即可直接用手機開啟。</p>
               </div>
             </div>
           </div>
@@ -306,6 +324,19 @@
                 <input type="text" id="setSchedulerTimes" placeholder="02:00, 14:00" />
                 <div id="schedulerStatusText" class="muted small" style="margin-top:4px;"></div>
               </div>
+              <div class="divider"></div>
+              <div class="field">
+                <label class="field-label">底層下載核心更新策略（aniGamerPlus）</label>
+                <select id="setCorePolicy" class="select">
+                  <option value="latest">跟隨開發者最新版（推薦：動畫瘋改版時即時修補）</option>
+                  <option value="pinned">鎖定當前版本（僅手動點擊更新）</option>
+                </select>
+                <div id="coreStatusText" class="muted small" style="margin-top:5px;">尚未檢查核心版本</div>
+              </div>
+              <div class="btn-group">
+                <button id="btnCheckCore" class="btn btn-secondary btn-sm">檢查核心版本</button>
+                <button id="btnUpdateCoreExe" class="btn btn-ghost btn-sm hidden">一鍵更新核心 (.exe)</button>
+              </div>
               <button id="btnSaveGeneral" class="btn btn-primary">儲存偏好與背景設定</button>
             </div>
           </div>
@@ -426,6 +457,18 @@
           <button id="btnBackToSearch" class="btn btn-ghost">上一步</button>
           <button id="btnSaveAnimeModal" class="btn btn-primary">儲存作品</button>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Custom Confirm Modal (works reliably in macOS PyWebView without window.confirm) -->
+  <div id="confirmModal" class="modal-overlay hidden">
+    <div class="modal-card" style="max-width:400px;">
+      <h3 id="confirmTitle" style="margin-bottom:8px;">確認操作</h3>
+      <p id="confirmMessage" class="muted" style="margin-bottom:18px;"></p>
+      <div class="btn-group" style="justify-content:flex-end;">
+        <button id="btnConfirmCancel" class="btn btn-ghost">取消</button>
+        <button id="btnConfirmOk" class="btn btn-danger">確定</button>
       </div>
     </div>
   </div>

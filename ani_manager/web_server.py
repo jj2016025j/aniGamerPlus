@@ -12,7 +12,10 @@ import mimetypes
 import os
 import re
 import secrets
+import ipaddress
+import shutil
 import socket
+import subprocess
 import threading
 import time
 import urllib.parse
@@ -57,6 +60,8 @@ from .notifier import (
     format_check_digest,
     format_download_report,
 )
+from .core_updater import check_core_status, download_latest_windows_core
+from .qr_svg import render_qr_svg
 from .scheduler_manager import get_os_schedule_status, install_os_schedule, remove_os_schedule
 from .watchlist_store import AnimeWatchItem, WatchlistStore, format_views, now_timestamp, sort_watchlist
 
@@ -64,47 +69,163 @@ DEVICE_COOKIE_NAME = "anm_device_token"
 DEVICE_COOKIE_MAX_AGE = 90 * 24 * 3600  # 記住設備 90 天（變更 PIN 碼後舊憑證立即失效）
 
 
-def detect_network_urls(port: int) -> dict[str, Any]:
-    """偵測本機內網 LAN IP 與 Tailscale IP，方便手機掃碼連線。"""
-    lan_ip = ""
-    tailscale_ip = ""
-    all_ips: list[str] = []
+_TAILSCALE_NET = ipaddress.ip_network("100.64.0.0/10")
 
+
+def _is_tailscale_ip(ip_str: str) -> bool:
+    try:
+        return ipaddress.ip_address(ip_str.strip()) in _TAILSCALE_NET
+    except ValueError:
+        return False
+
+
+def _is_private_lan_ip(ip_str: str) -> bool:
+    try:
+        ip_obj = ipaddress.ip_address(ip_str.strip())
+        return ip_obj.version == 4 and ip_obj.is_private and not ip_obj.is_loopback and not ip_obj.is_link_local and ip_obj not in _TAILSCALE_NET
+    except ValueError:
+        return False
+
+
+def _probe_tailscale_cli() -> tuple[bool, str, str]:
+    """
+    查詢本機 Tailscale 執行狀態與 IPv4。
+    回傳 (connected, ip_str, detail_source)。
+    """
+    candidates = [
+        shutil.which("tailscale"),
+        "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
+        "/opt/homebrew/bin/tailscale",
+        "/usr/local/bin/tailscale",
+        r"C:\Program Files\Tailscale\tailscale.exe",
+        r"C:\Program Files (x86)\Tailscale\tailscale.exe",
+    ]
+    ts_bin = next((c for c in candidates if c and Path(c).is_file()), None)
+    if not ts_bin:
+        return False, "", ""
+
+    # 1. 先查 status --json 確認 BackendState == Running
+    try:
+        proc = subprocess.run(
+            [ts_bin, "status", "--json"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=2.5,
+            check=False,
+        )
+        if proc.returncode == 0 and proc.stdout.strip().startswith("{"):
+            st = json.loads(proc.stdout)
+            backend_state = str(st.get("BackendState", ""))
+            self_ips = st.get("TailscaleIPs") or (st.get("Self") or {}).get("TailscaleIPs") or []
+            v4 = next((str(x) for x in self_ips if _is_tailscale_ip(str(x))), "")
+            if backend_state == "Running" and v4:
+                return True, v4, "Tailscale CLI"
+            if backend_state and backend_state != "Running":
+                return False, "", f"Tailscale ({backend_state})"
+    except Exception:
+        pass
+
+    # 2. 備援執行 tailscale ip -4
+    try:
+        proc = subprocess.run(
+            [ts_bin, "ip", "-4"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=2.0,
+            check=False,
+        )
+        if proc.returncode == 0:
+            for line in proc.stdout.splitlines():
+                ip = line.strip()
+                if _is_tailscale_ip(ip):
+                    return True, ip, "Tailscale CLI"
+    except Exception:
+        pass
+
+    return False, "", ""
+
+
+def _scan_os_interfaces() -> tuple[list[str], list[str]]:
+    """透過系統網路指令（macOS/Linux ifconfig、Windows ipconfig）掃描實際 LAN IP 與 Tailscale 虛擬網卡 IP。"""
+    lan_ips: list[str] = []
+    ts_ips: list[str] = []
+    cmds = [["ipconfig"]] if os.name == "nt" else [["ifconfig"], ["ip", "-4", "addr"]]
+    raw_output = ""
+    for cmd in cmds:
+        try:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=2.0,
+                check=False,
+            )
+            if proc.returncode == 0 and proc.stdout:
+                raw_output = proc.stdout
+                break
+        except Exception:
+            continue
+
+    if raw_output:
+        for ip in re.findall(r"\b(\d{1,3}(?:\.\d{1,3}){3})\b", raw_output):
+            if ip.startswith("255.") or ip.endswith(".255") or ip.endswith(".0"):
+                continue
+            if _is_tailscale_ip(ip) and ip not in ts_ips:
+                ts_ips.append(ip)
+            elif _is_private_lan_ip(ip) and ip not in lan_ips:
+                lan_ips.append(ip)
+
+    # 補上 socket 預設路由 IP（通常是最準確的對外 Wi-Fi / 乙太網 LAN IP）
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]
+        route_ip = s.getsockname()[0]
         s.close()
-        if ip and not ip.startswith("127."):
-            if ip.startswith("100."):
-                tailscale_ip = ip
-            else:
-                lan_ip = ip
+        if _is_private_lan_ip(route_ip):
+            if route_ip in lan_ips:
+                lan_ips.remove(route_ip)
+            lan_ips.insert(0, route_ip)
+        elif _is_tailscale_ip(route_ip) and route_ip not in ts_ips:
+            ts_ips.insert(0, route_ip)
     except Exception:
         pass
 
-    try:
-        hostname = socket.gethostname()
-        for info in socket.getaddrinfo(hostname, None, socket.AF_INET):
-            ip = str(info[4][0])
-            if ip.startswith("127.") or ip in all_ips:
-                continue
-            all_ips.append(ip)
-            if ip.startswith("100.") and not tailscale_ip:
-                tailscale_ip = ip
-            elif not lan_ip and (ip.startswith("192.168.") or ip.startswith("10.") or ip.startswith("172.")):
-                lan_ip = ip
-    except Exception:
-        pass
+    return lan_ips, ts_ips
 
-    primary_ip = lan_ip or tailscale_ip or (all_ips[0] if all_ips else "127.0.0.1")
+
+def detect_network_urls(port: int) -> dict[str, Any]:
+    """精準偵測本機區網 Wi-Fi IP 與 Tailscale VPN 狀態／IP，提供雙組完整連線網址。"""
+    ts_connected, ts_ip, ts_source = _probe_tailscale_cli()
+    lan_ips, iface_ts_ips = _scan_os_interfaces()
+
+    # 若 CLI 沒抓到（例如 macOS App Store 沙盒版 Tailscale），直接從 utun 介面補抓 100.64.0.0/10 IP
+    if not ts_ip and iface_ts_ips:
+        ts_ip = iface_ts_ips[0]
+        ts_connected = True
+        ts_source = "系統虛擬網卡 (utun)"
+
+    lan_ip = lan_ips[0] if lan_ips else ""
+    lan_url = f"http://{lan_ip}:{port}" if lan_ip else ""
+    ts_url = f"http://{ts_ip}:{port}" if (ts_connected and ts_ip) else ""
+    primary_url = ts_url or lan_url or f"http://127.0.0.1:{port}"
+
     return {
+        "port": port,
         "local_url": f"http://127.0.0.1:{port}",
         "lan_ip": lan_ip,
-        "lan_url": f"http://{lan_ip}:{port}" if lan_ip else "",
-        "tailscale_ip": tailscale_ip,
-        "tailscale_url": f"http://{tailscale_ip}:{port}" if tailscale_ip else "",
-        "primary_remote_url": f"http://{primary_ip}:{port}",
+        "lan_url": lan_url,
+        "tailscale_active": bool(ts_connected and ts_ip),
+        "tailscale_ip": ts_ip if ts_connected else "",
+        "tailscale_url": ts_url,
+        "tailscale_source": ts_source or "未啟動或未安裝",
+        "primary_remote_url": primary_url,
+        "checked_at": datetime.now().strftime("%H:%M:%S"),
     }
 
 
@@ -155,8 +276,20 @@ class AniManagerBackend:
         self._webauthn_challenges: dict[str, float] = {}
         self._stop_event = threading.Event()
         self._tray_thread: threading.Thread | None = None
+        self.actual_port: int = 8765
+        self._net_cache: dict[str, Any] | None = None
+        self._net_cache_ts: float = 0.0
+        self.on_quit_callback = None
 
         self.reload_state()
+        self.actual_port = self.config.web_port
+
+    def get_network_info(self, force: bool = False) -> dict[str, Any]:
+        now = time.monotonic()
+        if force or self._net_cache is None or (now - self._net_cache_ts) >= 5.0:
+            self._net_cache = detect_network_urls(self.actual_port)
+            self._net_cache_ts = now
+        return dict(self._net_cache)
 
     def log(self, level: str, message: str) -> None:
         entry = {
@@ -257,7 +390,7 @@ class AniManagerBackend:
             safe_cfg.pop("remote_auth_secret", None)
 
             return {
-                "version": "2.0.0",
+                "version": "2.0.1",
                 "auth": {
                     "enabled": self.config.remote_auth_enabled,
                     "is_local": is_local,
@@ -275,7 +408,7 @@ class AniManagerBackend:
                     "bangumi_dir": str(self.env.bangumi_dir),
                     "root_dir": str(self.env.root_dir),
                 },
-                "network": detect_network_urls(self.config.web_port),
+                "network": self.get_network_info(force=False),
                 "cookie": cookie_summary,
                 "config": safe_cfg,
                 "sort_options": [
@@ -762,6 +895,21 @@ class AniManagerWebServer:
                     return self._serve_static(ui_dir / "app.js")
                 if path == "/icon.png":
                     return self._serve_static(assets_dir / "icon.png")
+                if path == "/api/qr.svg":
+                    text = (qs.get("text") or [""])[0].strip()
+                    if not text or len(text) > 200:
+                        return self.send_error(400)
+                    try:
+                        svg_bytes = render_qr_svg(text).encode("utf-8")
+                    except Exception:
+                        return self.send_error(400)
+                    self.send_response(200)
+                    self.send_header("Content-Type", "image/svg+xml; charset=utf-8")
+                    self.send_header("Content-Length", str(len(svg_bytes)))
+                    self.send_header("Cache-Control", "no-store")
+                    self.end_headers()
+                    self.wfile.write(svg_bytes)
+                    return
 
                 is_local = self._is_local()
                 authed = self._is_authenticated()
@@ -770,7 +918,7 @@ class AniManagerWebServer:
                     if not authed:
                         return self._send_json(
                             {
-                                "version": "2.0.0",
+                                "version": "2.0.1",
                                 "auth": {
                                     "enabled": True,
                                     "is_local": is_local,
@@ -787,6 +935,9 @@ class AniManagerWebServer:
 
                 if path == "/api/files/list":
                     return self._send_json({"ok": True, "files": backend.list_bangumi_files()})
+
+                if path == "/api/core/status":
+                    return self._send_json({"ok": True, "core": check_core_status(backend.env, backend.config.core_update_policy)})
 
                 if path == "/api/files/download":
                     rel = (qs.get("path") or [""])[0]
@@ -888,6 +1039,28 @@ class AniManagerWebServer:
                 if path == "/api/task/cancel":
                     ok, msg = backend.cancel_active_task()
                     return self._send_json({"ok": ok, "message": msg})
+
+                if path == "/api/network/refresh":
+                    net = backend.get_network_info(force=True)
+                    ts_msg = f"Tailscale 已連線 ({net['tailscale_ip']})" if net["tailscale_active"] else "未偵測到 Tailscale"
+                    backend.log("info", f"已刷新網路狀態：區網 {net['lan_ip'] or '無'} ｜ {ts_msg}")
+                    return self._send_json({"ok": True, "network": net})
+
+                if path == "/api/core/update":
+                    ok, msg = download_latest_windows_core(backend.env)
+                    if ok:
+                        backend.reload_state()
+                    backend.log("ok" if ok else "warn", msg)
+                    return self._send_json({"ok": ok, "message": msg})
+
+                if path == "/api/system/quit":
+                    if not self._is_local():
+                        return self._send_json({"ok": False, "error": "僅允許從主機本機視窗關閉程式"}, status=403)
+                    cb = backend.on_quit_callback
+                    self._send_json({"ok": True, "message": "正在關閉 AniManager..."})
+                    if cb:
+                        threading.Timer(0.2, cb).start()
+                    return
 
                 if path == "/api/watchlist/search":
                     query = str(body.get("query", "")).strip()
@@ -1153,6 +1326,8 @@ class AniManagerWebServer:
                         cfg.auto_transfer_remote_downloads = bool(body["auto_transfer_remote_downloads"])
                     if "delete_host_after_transfer" in body:
                         cfg.delete_host_after_transfer = bool(body["delete_host_after_transfer"])
+                    if "core_update_policy" in body and body["core_update_policy"] in ("latest", "pinned"):
+                        cfg.core_update_policy = body["core_update_policy"]
                     if "tray_interval_minutes" in body:
                         cfg.tray_interval_minutes = max(10, int(body["tray_interval_minutes"] or 60))
                     if "scheduler_times" in body and isinstance(body["scheduler_times"], list):
@@ -1265,6 +1440,8 @@ class AniManagerWebServer:
             try:
                 self.httpd = _QuietHTTPServer((host, port + offset), Handler)
                 port = port + offset
+                backend.actual_port = port
+                backend._net_cache = None
                 break
             except OSError:
                 continue

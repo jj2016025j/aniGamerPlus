@@ -249,3 +249,12 @@ input:focus, textarea:focus, .select:focus { border-color: var(--primary); }
   }
   .m-nav-item.active { color: var(--primary); background: rgba(6, 182, 212, 0.14); }
 }
+
+/* v2.0.1 QR Switcher & URL Rows */
+.qr-col { display: flex; flex-direction: column; align-items: center; gap: 8px; flex-shrink: 0; }
+.qr-svg { width: 136px; height: 136px; padding: 6px; }
+.qr-tabs { display: flex; gap: 4px; width: 100%; }
+.qr-tabs .btn { flex: 1; }
+.qr-tabs .btn.active-tab { background: var(--primary); color: #fff; border-color: var(--primary); }
+.btn-xs { padding: 3px 8px; font-size: 0.74rem; border-radius: 6px; }
+.url-row-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; gap: 8px; }

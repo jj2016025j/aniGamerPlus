@@ -137,3 +137,11 @@ bangumi/
 .venv/
 __pycache__/
 *.pyc
+
+# PyInstaller 建置產物與執行檔
+AniManager.app/
+assets/icon.icns
+
+# 個人加密備份與無效憑證
+exports/
+*.anibak
