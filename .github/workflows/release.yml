@@ -41,7 +41,7 @@ jobs:
           - runner: windows-latest
             os_label: Windows-x64-AllInOne
             asset_name: AniManager-Windows-x64.zip
-          - runner: macos-latest
+          - runner: macos-15
             os_label: macOS-AppleSilicon
             asset_name: AniManager-macOS.zip
 
