@@ -18,12 +18,16 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Create Release if Not Exists
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           TAG_NAME: ${{ github.ref_name }}
         run: |
-          gh release view "$TAG_NAME" >/dev/null 2>&1 || gh release create "$TAG_NAME" --title "$TAG_NAME" --generate-notes
+          gh release view "$TAG_NAME" --repo "$GH_REPO" >/dev/null 2>&1 || gh release create "$TAG_NAME" --repo "$GH_REPO" --title "$TAG_NAME" --generate-notes
 
   build:
     name: Build ${{ matrix.os_label }}
@@ -87,7 +91,8 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           TAG_NAME: ${{ github.ref_name }}
           ASSET_NAME: ${{ matrix.asset_name }}
         run: |
-          gh release upload "$TAG_NAME" "$ASSET_NAME" --clobber
+          gh release upload "$TAG_NAME" "$ASSET_NAME" --repo "$GH_REPO" --clobber
